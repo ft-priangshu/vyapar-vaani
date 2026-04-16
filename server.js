@@ -8,18 +8,18 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ─── ENV CHECK ─────────────────────────────
+// ─── ENV ─────────────────────────────
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
 
 // ─── GEMINI ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── DB CONNECT ─────────────────────────────
+// ─── DB ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB error:", err));
+  .catch((err) => console.error(err));
 
 // ─── SCHEMAS ─────────────────────────────
 const productSchema = new mongoose.Schema({
@@ -30,7 +30,6 @@ const productSchema = new mongoose.Schema({
   status: { type: String, default: "LIVE" },
   createdAt: { type: Date, default: Date.now }
 });
-
 const Product = mongoose.model("Product", productSchema);
 
 const orderSchema = new mongoose.Schema({
@@ -42,72 +41,71 @@ const orderSchema = new mongoose.Schema({
   phone: String,
   address: String,
   status: { type: String, default: "PLACED" },
-  assignedTo: { type: String, default: "UNASSIGNED" },
   createdAt: { type: Date, default: Date.now }
 });
-
 const Order = mongoose.model("Order", orderSchema);
 
-const notificationSchema = new mongoose.Schema({
-  sellerId: String,
-  message: String,
-  type: String,
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Notification = mongoose.model("Notification", notificationSchema);
+// ─── TEMP MEMORY ─────────────────────────────
+const pending = {};
 
 // ─── PRICE ENGINE ─────────────────────────────
 function getPrice(name = "") {
   name = name.toLowerCase();
   if (name.includes("potato")) return "₹20/kg";
+  if (name.includes("onion")) return "₹30/kg";
   if (name.includes("rice")) return "₹50/kg";
   if (name.includes("wheat")) return "₹35/kg";
   return "₹100 (estimate)";
 }
 
-// ─── SAFE JSON PARSE ─────────────────────────────
+// ─── SAFE JSON ─────────────────────────────
 function safeParse(text) {
   try {
     return JSON.parse(text);
   } catch {
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
   }
 }
 
-// ─── GEMINI EXTRACTOR (FIXED STABILITY) ─────────────────────────────
-async function extractItems(message) {
-  try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: { responseMimeType: "application/json" }
-    });
+// ─── SMART AI ROUTER (NEW CORE) ─────────────────────────────
+async function routeMessage(message) {
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
+    generationConfig: { responseMimeType: "application/json" }
+  });
 
-    const prompt = `
-Extract products from:
-"${message}"
+  const prompt = `
+You are a smart AI router for a marketplace app.
 
-Return JSON array:
-[
-  { "name": "product", "quantity": "2 kg" }
-]
+Classify user message into ONE type:
+
+1. "SELL" → user wants to sell products
+2. "BUY" → user wants to buy
+3. "CHAT" → normal conversation
+4. "QUERY" → asking price/info
+
+Message: "${message}"
+
+Return ONLY JSON:
+{
+  "type": "SELL | BUY | CHAT | QUERY",
+  "items": [
+    { "name": "", "quantity": "" }
+  ]
+}
 
 Rules:
-- always extract numbers
-- if sentence form still extract
+- If selling products → extract items
+- If not selling → items = []
 `;
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+  const result = await model.generateContent(prompt);
+  const text = result.response.text();
 
-    return safeParse(text);
-  } catch (e) {
-    return [{ name: message, quantity: "1 unit" }];
-  }
+  return safeParse(text);
 }
 
-// ─── CHAT (STEP 1) ─────────────────────────────
+// ─── CHAT ROUTE (SMART ROUTER) ─────────────────────────────
 app.post("/chat", async (req, res) => {
   try {
     const { sellerId, message } = req.body;
@@ -115,21 +113,34 @@ app.post("/chat", async (req, res) => {
     if (!sellerId || !message)
       return res.status(400).json({ error: "sellerId + message required" });
 
-    const items = await extractItems(message);
+    const ai = await routeMessage(message);
 
-    const enriched = items.map(i => ({
+    // ─── NORMAL CHAT ─────────────────────────────
+    if (ai.type !== "SELL") {
+      return res.json({
+        type: ai.type,
+        message: "Processed by AI router",
+        reply:
+          ai.type === "CHAT"
+            ? "Got it 👍 How can I help you with selling?"
+            : "Here is the info you asked for",
+        items: ai.items || []
+      });
+    }
+
+    // ─── SELL FLOW ─────────────────────────────
+    const enriched = (ai.items || []).map(i => ({
       name: i.name,
       quantity: i.quantity,
       suggestedPrice: getPrice(i.name)
     }));
 
     const tempId = Date.now().toString();
+    pending[tempId] = { sellerId, items: enriched };
 
-    global.pending = global.pending || {};
-    global.pending[tempId] = { sellerId, items: enriched };
-
-    res.json({
-      message: "Confirm to list product",
+    return res.json({
+      type: "SELL",
+      message: "Do you want to sell at suggested price?",
       tempId,
       items: enriched,
       nextStep: "CONFIRM"
@@ -146,12 +157,11 @@ app.post("/confirm-sell", async (req, res) => {
   try {
     const { tempId, confirm } = req.body;
 
-    const data = global.pending?.[tempId];
-
-    if (!data)
+    if (!pending[tempId])
       return res.status(400).json({ error: "session expired" });
 
-    delete global.pending[tempId];
+    const data = pending[tempId];
+    delete pending[tempId];
 
     if (!confirm)
       return res.json({ message: "Cancelled" });
@@ -167,7 +177,7 @@ app.post("/confirm-sell", async (req, res) => {
     );
 
     res.json({
-      message: "OK getting listed",
+      message: "OK getting listed on marketplace",
       products: saved
     });
 
@@ -183,7 +193,7 @@ app.get("/products", async (req, res) => {
   res.json(products);
 });
 
-// ─── BUY (LOGISTICS READY) ─────────────────────────────
+// ─── BUY ─────────────────────────────
 app.post("/buy", async (req, res) => {
   try {
     const { productId, buyerName, phone, address } = req.body;
