@@ -17,7 +17,7 @@ console.log("GEMINI KEY EXISTS =", !!process.env.GEMINI_API_KEY);
 // ─── GEMINI SETUP ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── DB CONNECTION ─────────────────────────────
+// ─── DB CONNECT ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
@@ -72,23 +72,19 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── CLEAN NAME FUNCTION (IMPORTANT FIX) ─────────────────────────────
-function cleanName(name) {
+// ─── CLEAN PRODUCT NAME FIX ─────────────────────────────
+function cleanProductName(name) {
   if (!name) return "unknown";
 
   return name
     .toLowerCase()
-    .replace(/i am selling|selling|i have|have|product|items?/g, "")
+    .replace(/\b(kg|g|gram|grams|litre|liter|l|pcs|piece|pieces)\b/g, "")
     .replace(/[^a-z\s]/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 3)
-    .join(" ");
+    .trim();
 }
 
-// ─── GEMINI EXTRACTION (FIXED PROMPT) ─────────────────────────────
+// ─── GEMINI EXTRACTION (FINAL FIXED PROMPT) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
@@ -100,16 +96,15 @@ async function extractProductInfo(message) {
     });
 
     const prompt = `
-You are a STRICT PRODUCT EXTRACTION ENGINE.
+You are a STRICT product extraction engine.
 
 TASK:
-Extract ONLY product names and quantities from the message.
+Extract ONLY product names and quantities separately.
 
 RULES:
-- DO NOT copy full sentence
-- ONLY extract product names (rice, wheat, apple, etc.)
-- Split multiple items properly
-- If quantity missing → "1 unit"
+- Product name MUST NOT include units (kg, litre, etc.)
+- Quantity MUST include number + unit
+- Split multiple products correctly
 - Return ONLY valid JSON
 
 FORMAT:
@@ -117,7 +112,7 @@ FORMAT:
   "items": [
     {
       "name": "product name only",
-      "quantity": "quantity with unit"
+      "quantity": "number + unit"
     }
   ]
 }
@@ -149,17 +144,16 @@ MESSAGE:
     const parsed = JSON.parse(text);
 
     if (!parsed.items || !Array.isArray(parsed.items)) {
-      throw new Error("Invalid structure");
+      throw new Error("Invalid AI response");
     }
 
     return parsed;
   } catch (err) {
-    console.log("⚠️ AI failed, using fallback");
+    console.log("⚠️ AI fallback triggered");
 
-    // fallback
     return {
-      items: message.split("and").map((p) => ({
-        name: cleanName(p),
+      items: message.split(/and|,/i).map((p) => ({
+        name: cleanProductName(p),
         quantity: "1 unit",
       })),
     };
@@ -173,7 +167,7 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Running");
 });
 
-// CHAT
+// CHAT ROUTE
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -186,12 +180,16 @@ app.post("/chat", async (req, res) => {
 
     console.log("AI RESULT:", aiResult);
 
-    const itemsWithPrices = aiResult.items.map((item) => ({
-      name: cleanName(item.name),
-      quantity: item.quantity,
-      suggestedPrice: suggestMarketPrice(item.name),
-      imageUrl: null,
-    }));
+    const itemsWithPrices = aiResult.items.map((item) => {
+      const cleanName = cleanProductName(item.name);
+
+      return {
+        name: cleanName,
+        quantity: item.quantity,
+        suggestedPrice: suggestMarketPrice(cleanName),
+        imageUrl: null,
+      };
+    });
 
     const product = new Product({
       items: itemsWithPrices,
@@ -211,7 +209,7 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// PRODUCTS
+// GET PRODUCTS
 app.get("/products", async (req, res) => {
   const products = await Product.find();
   res.json(products);
@@ -265,7 +263,7 @@ app.post("/update-status", async (req, res) => {
   });
 });
 
-// IMAGE UPLOAD
+// UPLOAD IMAGE
 app.post("/upload-image", async (req, res) => {
   try {
     const { productId, itemIndex, imageUrl } = req.body;
@@ -295,7 +293,7 @@ app.post("/upload-image", async (req, res) => {
       product,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Upload error:", err);
     res.status(500).json({ error: "Upload failed" });
   }
 });
