@@ -23,20 +23,6 @@ mongoose
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SAFE JSON PARSER ─────────────────────────────
-function safeJSONParse(text) {
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    const cleaned = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-
-    return JSON.parse(cleaned);
-  }
-}
-
 // ─── PRODUCT SCHEMA ─────────────────────────────
 const productSchema = new mongoose.Schema({
   items: [
@@ -87,47 +73,38 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION (FULL SAFE) ─────────────────────────────
+// ─── GEMINI AI FUNCTION (FIXED FINAL VERSION) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
     });
 
-   const prompt = `
-You are a strict JSON generator for a marketplace system.
+    const prompt = `
+Extract products from the message.
 
-Extract all products from the user message.
+Return ONLY valid JSON:
 
-RULES:
-- Return ONLY valid JSON
-- No markdown
-- No explanation
-- No extra text
-- If multiple products exist, include all of them
-
-FORMAT:
 {
   "items": [
     {
-      "name": "exact product name",
-      "quantity": "exact quantity mentioned or '1 unit'"
+      "name": "product name",
+      "quantity": "quantity with unit"
     }
   ]
 }
 
-Examples:
+Rules:
+- Extract ALL products
+- If quantity missing → "1 unit"
+- NO explanation
+- NO markdown
+- NO extra text
 
-Input: I am selling 2 kg rice and 3 kg wheat
-Output:
-{
-  "items": [
-    { "name": "rice", "quantity": "2 kg" },
-    { "name": "wheat", "quantity": "3 kg" }
-  ]
-}
-
-Now extract from this message:
+Message:
 ${message}
 `;
 
@@ -135,26 +112,17 @@ ${message}
     const response = await result.response;
     let text = response.text();
 
-    // clean AI output
-    text = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-
-    // SAFE PARSE
+    // FIRST TRY DIRECT PARSE
     try {
       return JSON.parse(text);
     } catch (err) {
-      console.error("JSON PARSE FAILED:", text);
+      // CLEAN AND RETRY
+      text = text
+        .replace(/```json/g, "")
+        .replace(/```/g, "")
+        .trim();
 
-      return {
-        items: [
-          {
-            name: "unknown",
-            quantity: "1 unit",
-          },
-        ],
-      };
+      return JSON.parse(text);
     }
   } catch (err) {
     console.error("Gemini error:", err);
@@ -207,6 +175,7 @@ app.post("/chat", async (req, res) => {
       productId: product._id,
       nextStep: "UPLOAD_IMAGES",
     });
+
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Server error" });
@@ -298,6 +267,7 @@ app.post("/upload-image", async (req, res) => {
       message: "Image uploaded successfully",
       product,
     });
+
   } catch (err) {
     console.error("Upload error:", err);
     res.status(500).json({ error: "Upload failed" });
