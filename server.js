@@ -6,6 +6,9 @@ const express = require("express");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const app = express();
 
@@ -65,19 +68,40 @@ function suggestMarketPrice(productName) {
 }
 
 // ─── Helper: Extract product info from message ────────────────
-function extractProductInfo(message) {
-  const nameMatch = message.match(/(?:selling|sell|have|product[:\s]+)?\s*([a-zA-Z\s]+?)(?:\s+(?:quantity|qty|price|at|for|rs|₹|\d))/i);
-  const name = nameMatch ? nameMatch[1].trim() : "Unknown Product";
+async function extractProductInfo(message) {
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
+  });
 
-  const qtyMatch = message.match(/(\d+)\s*(kg|litre|liter|piece|pcs|units?|bags?|boxes?)?/i);
-  const quantity = qtyMatch
-    ? `${qtyMatch[1]} ${qtyMatch[2] || "units"}`
-    : "1 unit";
+  const prompt = `
+You are an AI for a marketplace.
 
-  const priceMatch = message.match(/(?:rs\.?|₹|price[:\s]+|at|for)\s*(\d+)/i);
-  const price = priceMatch ? `₹${priceMatch[1]}` : "Not specified";
+Extract items from the message.
 
-  return { name, quantity, price };
+Return ONLY valid JSON:
+
+{
+  "items": [
+    {
+      "name": "string",
+      "quantity": "string"
+    }
+  ]
+}
+
+Rules:
+- Detect multiple items
+- If quantity missing → "1 unit"
+- Output ONLY JSON (no text)
+
+Message: ${message}
+`;
+
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const text = response.text();
+
+  return JSON.parse(text);
 }
 
 // ─── Routes ───────────────────────────────────────────────────
@@ -88,36 +112,25 @@ app.get("/", (req, res) => {
 });
 
 // Chat route
-app.post("/chat", async (req, res) => {
-  try {
-    const { message } = req.body;
+const aiResult = await extractProductInfo(message);
 
-    if (!message) {
-      return res.status(400).json({ error: "Message is required" });
-    }
+const itemsWithPrices = aiResult.items.map(item => ({
+  name: item.name,
+  quantity: item.quantity,
+  suggestedPrice: suggestMarketPrice(item.name)
+}));
 
-    const { name, quantity, price } = extractProductInfo(message);
-    const suggestedPrice = suggestMarketPrice(name);
+const newProduct = new Product({
+  items: itemsWithPrices
+});
 
-    const newProduct = new Product({
-      name,
-      quantity,
-      price,
-      suggestedPrice,
-    });
+await newProduct.save();
 
-    await newProduct.save();
-
-    res.json({
-      message: "Product detected and saved!",
-      detected: { name, quantity, price },
-      suggestedPrice,
-      productId: newProduct._id,
-    });
-  } catch (err) {
-    console.error("Error in /chat:", err);
-    res.status(500).json({ error: "Something went wrong" });
-  }
+res.json({
+  message: "AI extracted items successfully",
+  items: itemsWithPrices,
+  productId: newProduct._id,
+  nextStep: "UPLOAD_IMAGES"
 });
 
 // Get products
