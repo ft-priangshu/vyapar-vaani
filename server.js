@@ -14,7 +14,9 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // ─── MongoDB Connection ───────────────────────────────────────
-const MONGO_URI = "mongodb://admin:admin123@ac-dr913z9-shard-00-00.oaditjn.mongodb.net:27017,ac-dr913z9-shard-00-01.oaditjn.mongodb.net:27017,ac-dr913z9-shard-00-02.oaditjn.mongodb.net:27017/vyapaar?ssl=true&replicaSet=atlas-oqvlma-shard-0&authSource=admin";
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch(err => console.log(err));
 
 mongoose
   .connect(MONGO_URI)
