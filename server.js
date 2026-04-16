@@ -12,6 +12,7 @@ app.use(bodyParser.json());
 
 // ─── ENV DEBUG ─────────────────────────────
 console.log("MONGO_URI =", process.env.MONGO_URI);
+console.log("GEMINI KEY EXISTS =", !!process.env.GEMINI_API_KEY);
 
 // ─── GEMINI SETUP ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -22,7 +23,7 @@ mongoose
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SAFE PARSER ─────────────────────────────
+// ─── SAFE JSON PARSER ─────────────────────────────
 function safeJSONParse(text) {
   try {
     return JSON.parse(text);
@@ -86,7 +87,7 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION (FIXED) ─────────────────────────────
+// ─── GEMINI AI FUNCTION (FULL SAFE) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
@@ -96,7 +97,7 @@ async function extractProductInfo(message) {
     const prompt = `
 You are a marketplace AI.
 
-Extract items from message.
+Extract items from the message.
 
 Return ONLY valid JSON:
 
@@ -112,24 +113,37 @@ Return ONLY valid JSON:
 Rules:
 - detect multiple items
 - default quantity = "1 unit"
-- NO explanation
+- no explanation
 `;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
     let text = response.text();
 
-    // clean Gemini output
+    // clean AI output
     text = text
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
 
-    return JSON.parse(text);
+    // SAFE PARSE
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      console.error("JSON PARSE FAILED:", text);
+
+      return {
+        items: [
+          {
+            name: "unknown",
+            quantity: "1 unit",
+          },
+        ],
+      };
+    }
   } catch (err) {
     console.error("Gemini error:", err);
 
-    // fallback safe response
     return {
       items: [
         {
@@ -148,7 +162,7 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Running");
 });
 
-// CHAT (AI)
+// CHAT (AI CORE)
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -240,7 +254,7 @@ app.post("/update-status", async (req, res) => {
   });
 });
 
-// UPLOAD IMAGE (SAFE VERSION)
+// UPLOAD IMAGE
 app.post("/upload-image", async (req, res) => {
   try {
     const { productId, itemIndex, imageUrl } = req.body;
