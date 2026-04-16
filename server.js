@@ -17,13 +17,13 @@ console.log("GEMINI KEY EXISTS =", !!process.env.GEMINI_API_KEY);
 // ─── GEMINI SETUP ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── MONGODB CONNECTION ─────────────────────────────
+// ─── DB CONNECTION ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── PRODUCT SCHEMA ─────────────────────────────
+// ─── SCHEMAS ─────────────────────────────
 const productSchema = new mongoose.Schema({
   items: [
     {
@@ -45,7 +45,6 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.model("Product", productSchema);
 
-// ─── ORDER SCHEMA ─────────────────────────────
 const orderSchema = new mongoose.Schema({
   productId: String,
   buyerName: String,
@@ -55,7 +54,7 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── MARKET PRICE FUNCTION ─────────────────────────────
+// ─── MARKET PRICE ─────────────────────────────
 function suggestMarketPrice(name) {
   name = (name || "").toLowerCase();
 
@@ -73,7 +72,7 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION (FIXED FINAL) ─────────────────────────────
+// ─── AI EXTRACTION (ROBUST FINAL VERSION) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
@@ -85,9 +84,9 @@ async function extractProductInfo(message) {
     });
 
     const prompt = `
-You are a strict JSON API.
+You are a strict JSON extraction system.
 
-Extract products from user message.
+Extract products from message.
 
 Return ONLY valid JSON:
 
@@ -100,10 +99,11 @@ Return ONLY valid JSON:
   ]
 }
 
-Rules:
+RULES:
 - No explanation
 - No markdown
-- Always valid JSON
+- No extra text
+- Always return valid JSON
 - If quantity missing → "1 unit"
 
 Message:
@@ -114,15 +114,42 @@ Message:
     const response = await result.response;
     let text = response.text();
 
-    try {
-      return JSON.parse(text);
-    } catch (err) {
-      text = text
-        .replace(/```json/g, "")
-        .replace(/```/g, "")
-        .trim();
+    // clean output
+    text = text
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
 
-      return JSON.parse(text);
+    try {
+      const parsed = JSON.parse(text);
+
+      if (!parsed.items || !Array.isArray(parsed.items)) {
+        throw new Error("Invalid structure");
+      }
+
+      return parsed;
+    } catch (err) {
+      console.log("⚠️ Gemini invalid output, using fallback");
+
+      // SMART FALLBACK (NO MORE "unknown")
+      const fallbackItems = message
+        .split(/and|,/i)
+        .map((part) => {
+          const words = part.trim().split(" ");
+
+          return {
+            name: words.slice(-2).join(" ") || part.trim(),
+            quantity: "1 unit",
+          };
+        })
+        .filter((i) => i.name);
+
+      return {
+        items: fallbackItems.length ? fallbackItems : [{
+          name: message,
+          quantity: "1 unit",
+        }],
+      };
     }
   } catch (err) {
     console.error("Gemini error:", err);
@@ -130,7 +157,7 @@ Message:
     return {
       items: [
         {
-          name: "unknown",
+          name: message || "unknown item",
           quantity: "1 unit",
         },
       ],
@@ -145,7 +172,7 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Running Successfully");
 });
 
-// CHAT (AI CORE)
+// CHAT (MAIN AI ROUTE)
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -156,7 +183,7 @@ app.post("/chat", async (req, res) => {
 
     const aiResult = await extractProductInfo(message);
 
-    console.log("RAW AI RESULT:", aiResult);
+    console.log("AI RESULT:", aiResult);
 
     const itemsWithPrices = aiResult.items.map((item) => ({
       name: item.name,
@@ -177,6 +204,7 @@ app.post("/chat", async (req, res) => {
       productId: product._id,
       nextStep: "UPLOAD_IMAGES",
     });
+
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Server error" });
@@ -268,6 +296,7 @@ app.post("/upload-image", async (req, res) => {
       message: "Image uploaded successfully",
       product,
     });
+
   } catch (err) {
     console.error("Upload error:", err);
     res.status(500).json({ error: "Upload failed" });
