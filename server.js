@@ -6,24 +6,23 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 
-// ─── MIDDLEWARE ─────────────────────────────
 app.use(cors());
 app.use(bodyParser.json());
 
-// ─── ENV DEBUG ─────────────────────────────
+// ─── ENV CHECK ─────────────────────────────
 console.log("MONGO_URI =", process.env.MONGO_URI);
 console.log("GEMINI KEY EXISTS =", !!process.env.GEMINI_API_KEY);
 
-// ─── GEMINI SETUP ─────────────────────────────
+// ─── GEMINI INIT ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── DB CONNECT ─────────────────────────────
+// ─── DB CONNECT (SAFE) ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SCHEMAS ─────────────────────────────
+// ─── PRODUCT SCHEMA ─────────────────────────────
 const productSchema = new mongoose.Schema({
   items: [
     {
@@ -45,11 +44,20 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.model("Product", productSchema);
 
+// ─── ORDER SCHEMA ─────────────────────────────
 const orderSchema = new mongoose.Schema({
   productId: String,
   buyerName: String,
+  phone: String,
   address: String,
-  status: String,
+  status: {
+    type: String,
+    default: "ORDER_PLACED",
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
 });
 
 const Order = mongoose.model("Order", orderSchema);
@@ -72,20 +80,20 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── CLEAN PRODUCT NAME FIX ─────────────────────────────
-function cleanProductName(name) {
+// ─── CLEAN NAME ─────────────────────────────
+function cleanName(name) {
   if (!name) return "unknown";
 
   return name
     .toLowerCase()
-    .replace(/\b(kg|g|gram|grams|litre|liter|l|pcs|piece|pieces)\b/g, "")
     .replace(/[^a-z\s]/g, " ")
+    .replace(/\b(kg|g|gram|grams|litre|liter|l|pcs|piece|pieces)\b/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-// ─── GEMINI EXTRACTION (FINAL FIXED PROMPT) ─────────────────────────────
-async function extractProductInfo(message) {
+// ─── AI FUNCTION ─────────────────────────────
+async function extractItems(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
@@ -96,66 +104,40 @@ async function extractProductInfo(message) {
     });
 
     const prompt = `
-You are a STRICT product extraction engine.
+Extract products from this message.
 
-TASK:
-Extract ONLY product names and quantities separately.
-
-RULES:
-- Product name MUST NOT include units (kg, litre, etc.)
-- Quantity MUST include number + unit
-- Split multiple products correctly
-- Return ONLY valid JSON
-
-FORMAT:
+Return ONLY JSON:
 {
   "items": [
     {
-      "name": "product name only",
+      "name": "product name",
       "quantity": "number + unit"
     }
   ]
 }
 
-EXAMPLE:
-Input: I am selling 2 kg rice and 3 kg wheat
-
-Output:
-{
-  "items": [
-    { "name": "rice", "quantity": "2 kg" },
-    { "name": "wheat", "quantity": "3 kg" }
-  ]
-}
-
-MESSAGE:
-"""${message}"""
+Message: ${message}
 `;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
     let text = response.text();
 
-    text = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
+    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
     const parsed = JSON.parse(text);
 
-    if (!parsed.items || !Array.isArray(parsed.items)) {
-      throw new Error("Invalid AI response");
-    }
-
     return parsed;
   } catch (err) {
-    console.log("⚠️ AI fallback triggered");
+    console.log("AI fallback used");
 
     return {
-      items: message.split(/and|,/i).map((p) => ({
-        name: cleanProductName(p),
-        quantity: "1 unit",
-      })),
+      items: [
+        {
+          name: message,
+          quantity: "1 unit",
+        },
+      ],
     };
   }
 }
@@ -167,7 +149,7 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Running");
 });
 
-// CHAT ROUTE
+// CHAT (MAIN AI + SAVE PRODUCT)
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -176,78 +158,78 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Message required" });
     }
 
-    const aiResult = await extractProductInfo(message);
+    const ai = await extractItems(message);
 
-    console.log("AI RESULT:", aiResult);
-
-    const itemsWithPrices = aiResult.items.map((item) => {
-      const cleanName = cleanProductName(item.name);
+    const items = ai.items.map((item) => {
+      const name = cleanName(item.name);
 
       return {
-        name: cleanName,
+        name,
         quantity: item.quantity,
-        suggestedPrice: suggestMarketPrice(cleanName),
+        suggestedPrice: suggestMarketPrice(name),
         imageUrl: null,
       };
     });
 
-    const product = new Product({
-      items: itemsWithPrices,
-    });
-
+    const product = new Product({ items });
     await product.save();
 
-    res.json({
+    return res.json({
       message: "AI processed successfully",
-      items: itemsWithPrices,
       productId: product._id,
+      items,
       nextStep: "UPLOAD_IMAGES",
     });
   } catch (err) {
-    console.error("Chat error:", err);
+    console.error("CHAT ERROR:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// GET PRODUCTS
+// GET PRODUCTS (MARKETPLACE)
 app.get("/products", async (req, res) => {
-  const products = await Product.find();
-  res.json(products);
+  try {
+    const products = await Product.find().sort({ createdAt: -1 });
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: "Cannot fetch products" });
+  }
 });
 
-// BUY
+// BUY (LOGISTICS DATA)
 app.post("/buy", async (req, res) => {
   try {
-    const { productId, buyerName, address } = req.body;
+    const { productId, buyerName, phone, address } = req.body;
 
-    const product = await Product.findById(productId);
-    if (!product) return res.status(404).json({ error: "Not found" });
+    if (!productId || !buyerName || !phone || !address) {
+      return res.status(400).json({ error: "Missing details" });
+    }
 
     const order = new Order({
       productId,
       buyerName,
+      phone,
       address,
-      status: "PLACED",
     });
 
     await order.save();
 
     res.json({
-      message: "Order placed",
-      order,
+      message: "Order placed successfully",
+      orderId: order._id,
     });
   } catch (err) {
-    res.status(500).json({ error: "Buy error" });
+    res.status(500).json({ error: "Buy failed" });
   }
 });
 
-// ORDERS
+// ORDERS (LOGISTICS VIEW)
 app.get("/orders", async (req, res) => {
-  const orders = await Order.find();
+  const orders = await Order.find().sort({ createdAt: -1 });
   res.json(orders);
 });
 
-// UPDATE STATUS
+// UPDATE ORDER STATUS
 app.post("/update-status", async (req, res) => {
   const { orderId, status } = req.body;
 
@@ -257,48 +239,11 @@ app.post("/update-status", async (req, res) => {
     { new: true }
   );
 
-  res.json({
-    message: "Updated",
-    order: updated,
-  });
-});
-
-// UPLOAD IMAGE
-app.post("/upload-image", async (req, res) => {
-  try {
-    const { productId, itemIndex, imageUrl } = req.body;
-
-    const product = await Product.findById(productId);
-
-    if (!product) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    if (!product.items[itemIndex]) {
-      return res.status(400).json({ error: "Invalid item index" });
-    }
-
-    product.items[itemIndex].imageUrl = imageUrl;
-
-    const allUploaded = product.items.every((i) => i.imageUrl);
-
-    if (allUploaded) {
-      product.status = "LIVE";
-    }
-
-    await product.save();
-
-    res.json({
-      message: "Image uploaded successfully",
-      product,
-    });
-  } catch (err) {
-    console.error("Upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
-  }
+  res.json({ message: "Updated", order: updated });
 });
 
 // START SERVER
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
 });
