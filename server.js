@@ -94,26 +94,41 @@ async function extractProductInfo(message) {
       model: "gemini-1.5-flash",
     });
 
-    const prompt = `
-You are a marketplace AI.
+   const prompt = `
+You are a strict JSON generator for a marketplace system.
 
-Extract items from the message.
+Extract all products from the user message.
 
-Return ONLY valid JSON:
+RULES:
+- Return ONLY valid JSON
+- No markdown
+- No explanation
+- No extra text
+- If multiple products exist, include all of them
 
+FORMAT:
 {
   "items": [
     {
-      "name": "string",
-      "quantity": "string"
+      "name": "exact product name",
+      "quantity": "exact quantity mentioned or '1 unit'"
     }
   ]
 }
 
-Rules:
-- detect multiple items
-- default quantity = "1 unit"
-- no explanation
+Examples:
+
+Input: I am selling 2 kg rice and 3 kg wheat
+Output:
+{
+  "items": [
+    { "name": "rice", "quantity": "2 kg" },
+    { "name": "wheat", "quantity": "3 kg" }
+  ]
+}
+
+Now extract from this message:
+${message}
 `;
 
     const result = await model.generateContent(prompt);
