@@ -54,7 +54,7 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── MARKET PRICE ─────────────────────────────
+// ─── PRICE LOGIC ─────────────────────────────
 function suggestMarketPrice(name) {
   name = (name || "").toLowerCase();
 
@@ -72,7 +72,23 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── AI EXTRACTION (ROBUST FINAL VERSION) ─────────────────────────────
+// ─── CLEAN NAME FUNCTION (IMPORTANT FIX) ─────────────────────────────
+function cleanName(name) {
+  if (!name) return "unknown";
+
+  return name
+    .toLowerCase()
+    .replace(/i am selling|selling|i have|have|product|items?/g, "")
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(" ");
+}
+
+// ─── GEMINI EXTRACTION (FIXED PROMPT) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
@@ -84,29 +100,40 @@ async function extractProductInfo(message) {
     });
 
     const prompt = `
-You are a strict JSON extraction system.
+You are a STRICT PRODUCT EXTRACTION ENGINE.
 
-Extract products from message.
+TASK:
+Extract ONLY product names and quantities from the message.
 
-Return ONLY valid JSON:
+RULES:
+- DO NOT copy full sentence
+- ONLY extract product names (rice, wheat, apple, etc.)
+- Split multiple items properly
+- If quantity missing → "1 unit"
+- Return ONLY valid JSON
 
+FORMAT:
 {
   "items": [
     {
-      "name": "product name",
+      "name": "product name only",
       "quantity": "quantity with unit"
     }
   ]
 }
 
-RULES:
-- No explanation
-- No markdown
-- No extra text
-- Always return valid JSON
-- If quantity missing → "1 unit"
+EXAMPLE:
+Input: I am selling 2 kg rice and 3 kg wheat
 
-Message:
+Output:
+{
+  "items": [
+    { "name": "rice", "quantity": "2 kg" },
+    { "name": "wheat", "quantity": "3 kg" }
+  ]
+}
+
+MESSAGE:
 """${message}"""
 `;
 
@@ -114,53 +141,27 @@ Message:
     const response = await result.response;
     let text = response.text();
 
-    // clean output
     text = text
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
 
-    try {
-      const parsed = JSON.parse(text);
+    const parsed = JSON.parse(text);
 
-      if (!parsed.items || !Array.isArray(parsed.items)) {
-        throw new Error("Invalid structure");
-      }
-
-      return parsed;
-    } catch (err) {
-      console.log("⚠️ Gemini invalid output, using fallback");
-
-      // SMART FALLBACK (NO MORE "unknown")
-      const fallbackItems = message
-        .split(/and|,/i)
-        .map((part) => {
-          const words = part.trim().split(" ");
-
-          return {
-            name: words.slice(-2).join(" ") || part.trim(),
-            quantity: "1 unit",
-          };
-        })
-        .filter((i) => i.name);
-
-      return {
-        items: fallbackItems.length ? fallbackItems : [{
-          name: message,
-          quantity: "1 unit",
-        }],
-      };
+    if (!parsed.items || !Array.isArray(parsed.items)) {
+      throw new Error("Invalid structure");
     }
-  } catch (err) {
-    console.error("Gemini error:", err);
 
+    return parsed;
+  } catch (err) {
+    console.log("⚠️ AI failed, using fallback");
+
+    // fallback
     return {
-      items: [
-        {
-          name: message || "unknown item",
-          quantity: "1 unit",
-        },
-      ],
+      items: message.split("and").map((p) => ({
+        name: cleanName(p),
+        quantity: "1 unit",
+      })),
     };
   }
 }
@@ -169,10 +170,10 @@ Message:
 
 // HOME
 app.get("/", (req, res) => {
-  res.send("🚀 Backend Running Successfully");
+  res.send("🚀 Backend Running");
 });
 
-// CHAT (MAIN AI ROUTE)
+// CHAT
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -186,7 +187,7 @@ app.post("/chat", async (req, res) => {
     console.log("AI RESULT:", aiResult);
 
     const itemsWithPrices = aiResult.items.map((item) => ({
-      name: item.name,
+      name: cleanName(item.name),
       quantity: item.quantity,
       suggestedPrice: suggestMarketPrice(item.name),
       imageUrl: null,
@@ -204,14 +205,13 @@ app.post("/chat", async (req, res) => {
       productId: product._id,
       nextStep: "UPLOAD_IMAGES",
     });
-
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// GET PRODUCTS
+// PRODUCTS
 app.get("/products", async (req, res) => {
   const products = await Product.find();
   res.json(products);
@@ -223,9 +223,7 @@ app.post("/buy", async (req, res) => {
     const { productId, buyerName, address } = req.body;
 
     const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ error: "Not found" });
-    }
+    if (!product) return res.status(404).json({ error: "Not found" });
 
     const order = new Order({
       productId,
@@ -267,7 +265,7 @@ app.post("/update-status", async (req, res) => {
   });
 });
 
-// UPLOAD IMAGE
+// IMAGE UPLOAD
 app.post("/upload-image", async (req, res) => {
   try {
     const { productId, itemIndex, imageUrl } = req.body;
@@ -296,14 +294,13 @@ app.post("/upload-image", async (req, res) => {
       message: "Image uploaded successfully",
       product,
     });
-
   } catch (err) {
-    console.error("Upload error:", err);
+    console.error(err);
     res.status(500).json({ error: "Upload failed" });
   }
 });
 
-// ─── START SERVER ─────────────────────────────
+// START SERVER
 app.listen(3000, () => {
   console.log("Server running on port 3000");
 });
