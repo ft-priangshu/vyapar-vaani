@@ -1,7 +1,3 @@
-// =============================
-//        server.js
-// =============================
-
 const express = require("express");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
@@ -10,23 +6,23 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 
-// ─── Middleware ───────────────────────────────────────────────
+// ─── Middleware ─────────────────────────────
 app.use(cors());
 app.use(bodyParser.json());
 
-// ─── ENV CHECK ───────────────────────────────────────────────
+// ─── ENV ─────────────────────────────
 console.log("MONGO_URI =", process.env.MONGO_URI);
 
-// ─── GEMINI SETUP ─────────────────────────────────────────────
+// ─── GEMINI SETUP ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── MongoDB Connection ───────────────────────────────────────
+// ─── MONGODB CONNECT ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+  .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SAFE JSON PARSER ─────────────────────────────────────────
+// ─── SAFE JSON PARSER ─────────────────────────────
 function safeJSONParse(text) {
   try {
     return JSON.parse(text);
@@ -40,56 +36,68 @@ function safeJSONParse(text) {
   }
 }
 
-// ─── MODEL ────────────────────────────────────────────────────
+// ─── PRODUCT SCHEMA (UPDATED) ─────────────────────────────
 const productSchema = new mongoose.Schema({
-  name: String,
-  quantity: String,
-  price: String,
-  suggestedPrice: String,
+  items: [
+    {
+      name: String,
+      quantity: String,
+      suggestedPrice: String,
+      imageUrl: String
+    }
+  ],
+  status: {
+    type: String,
+    default: "PENDING_IMAGES"
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
 });
 
 const Product = mongoose.model("Product", productSchema);
 
+// ─── ORDER SCHEMA ─────────────────────────────
 const orderSchema = new mongoose.Schema({
   productId: String,
   buyerName: String,
   address: String,
-  status: String,
+  status: String
 });
 
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── MARKET PRICE LOGIC ───────────────────────────────────────
-function suggestMarketPrice(productName) {
-  const name = productName.toLowerCase();
+// ─── MARKET PRICE LOGIC ─────────────────────────────
+function suggestMarketPrice(name) {
+  name = name.toLowerCase();
 
-  if (name.includes("rice")) return "₹50 per kg";
-  if (name.includes("wheat")) return "₹35 per kg";
-  if (name.includes("potato")) return "₹20 per kg";
-  if (name.includes("onion")) return "₹30 per kg";
-  if (name.includes("tomato")) return "₹40 per kg";
-  if (name.includes("milk")) return "₹55 per litre";
-  if (name.includes("sugar")) return "₹45 per kg";
-  if (name.includes("oil")) return "₹150 per litre";
-  if (name.includes("flour")) return "₹40 per kg";
-  if (name.includes("egg")) return "₹7 per piece";
+  if (name.includes("rice")) return "₹50/kg";
+  if (name.includes("wheat")) return "₹35/kg";
+  if (name.includes("potato")) return "₹20/kg";
+  if (name.includes("onion")) return "₹30/kg";
+  if (name.includes("tomato")) return "₹40/kg";
+  if (name.includes("milk")) return "₹55/L";
+  if (name.includes("sugar")) return "₹45/kg";
+  if (name.includes("oil")) return "₹150/L";
+  if (name.includes("flour")) return "₹40/kg";
+  if (name.includes("egg")) return "₹7/piece";
 
-  return "₹100 (estimated market price)";
+  return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION ───────────────────────────────────────
+// ─── GEMINI AI FUNCTION ─────────────────────────────
 async function extractProductInfo(message) {
   const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash",
+    model: "gemini-1.5-flash"
   });
 
   const prompt = `
-You are an AI for a marketplace.
+You are a marketplace AI.
 
-Extract items from the message.
+Extract products from message.
 
-Return ONLY valid JSON:
-
+Return ONLY JSON:
 {
   "items": [
     {
@@ -100,11 +108,9 @@ Return ONLY valid JSON:
 }
 
 Rules:
-- Detect multiple items
-- If quantity missing → "1 unit"
-- Output ONLY JSON (no explanation)
-
-Message: ${message}
+- detect multiple items
+- default quantity = "1 unit"
+- NO explanation
 `;
 
   const result = await model.generateContent(prompt);
@@ -114,20 +120,20 @@ Message: ${message}
   return safeJSONParse(text);
 }
 
-// ─── ROUTES ───────────────────────────────────────────────────
+// ─── ROUTES ─────────────────────────────
 
-// ROOT
+// HOME
 app.get("/", (req, res) => {
-  res.send("🚀 Vyapar Vaani Backend is running");
+  res.send("🚀 Backend Running");
 });
 
-// CHAT (FIXED)
+// CHAT (MAIN AI ROUTE)
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
 
     if (!message) {
-      return res.status(400).json({ error: "Message is required" });
+      return res.status(400).json({ error: "Message required" });
     }
 
     const aiResult = await extractProductInfo(message);
@@ -136,30 +142,29 @@ app.post("/chat", async (req, res) => {
       name: item.name,
       quantity: item.quantity,
       suggestedPrice: suggestMarketPrice(item.name),
+      imageUrl: null
     }));
 
-    const newProduct = new Product({
-      name: itemsWithPrices[0]?.name || "Unknown",
-      quantity: itemsWithPrices[0]?.quantity || "1 unit",
-      price: "Not set",
-      suggestedPrice: itemsWithPrices[0]?.suggestedPrice || "₹100",
+    const product = new Product({
+      items: itemsWithPrices
     });
 
-    await newProduct.save();
+    await product.save();
 
     res.json({
-      message: "AI extracted items successfully",
+      message: "AI processed successfully",
       items: itemsWithPrices,
-      productId: newProduct._id,
-      nextStep: "UPLOAD_IMAGES",
+      productId: product._id,
+      nextStep: "UPLOAD_IMAGES"
     });
+
   } catch (err) {
-    console.error("Error in /chat:", err);
-    res.status(500).json({ error: "Something went wrong" });
+    console.error("Chat error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// PRODUCTS
+// GET PRODUCTS
 app.get("/products", async (req, res) => {
   const products = await Product.find();
   res.json(products);
@@ -172,24 +177,25 @@ app.post("/buy", async (req, res) => {
 
     const product = await Product.findById(productId);
     if (!product) {
-      return res.status(404).json({ error: "Product not found" });
+      return res.status(404).json({ error: "Not found" });
     }
 
     const order = new Order({
       productId,
       buyerName,
       address,
-      status: "Order Placed",
+      status: "PLACED"
     });
 
     await order.save();
 
     res.json({
-      message: "Order placed successfully!",
-      order,
+      message: "Order placed",
+      order
     });
+
   } catch (err) {
-    res.status(500).json({ error: "Could not place order" });
+    res.status(500).json({ error: "Buy error" });
   }
 });
 
@@ -199,27 +205,23 @@ app.get("/orders", async (req, res) => {
   res.json(orders);
 });
 
-// UPDATE STATUS
+// UPDATE ORDER
 app.post("/update-status", async (req, res) => {
-  try {
-    const { orderId, status } = req.body;
+  const { orderId, status } = req.body;
 
-    const updatedOrder = await Order.findByIdAndUpdate(
-      orderId,
-      { status },
-      { new: true }
-    );
+  const updated = await Order.findByIdAndUpdate(
+    orderId,
+    { status },
+    { new: true }
+  );
 
-    res.json({
-      message: "Order status updated!",
-      order: updatedOrder,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Could not update order status" });
-  }
+  res.json({
+    message: "Updated",
+    order: updated
+  });
 });
 
-// ─── START SERVER ─────────────────────────────────────────────
+// ─── START SERVER ─────────────────────────────
 app.listen(3000, () => {
-  console.log("🚀 Server is running on http://localhost:3000");
+  console.log("Server running on port 3000");
 });
