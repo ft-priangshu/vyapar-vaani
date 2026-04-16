@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ─── ENV ─────────────────────────────
+// ─── ENV DEBUG ─────────────────────────────
 console.log("MONGO_URI =", process.env.MONGO_URI);
 
 // ─── GEMINI SETUP ─────────────────────────────
@@ -22,7 +22,7 @@ mongoose
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SAFE JSON PARSER ─────────────────────────────
+// ─── SAFE PARSER ─────────────────────────────
 function safeJSONParse(text) {
   try {
     return JSON.parse(text);
@@ -36,24 +36,24 @@ function safeJSONParse(text) {
   }
 }
 
-// ─── PRODUCT SCHEMA (UPDATED) ─────────────────────────────
+// ─── PRODUCT SCHEMA ─────────────────────────────
 const productSchema = new mongoose.Schema({
   items: [
     {
       name: String,
       quantity: String,
       suggestedPrice: String,
-      imageUrl: String
-    }
+      imageUrl: String,
+    },
   ],
   status: {
     type: String,
-    default: "PENDING_IMAGES"
+    default: "PENDING_IMAGES",
   },
   createdAt: {
     type: Date,
-    default: Date.now
-  }
+    default: Date.now,
+  },
 });
 
 const Product = mongoose.model("Product", productSchema);
@@ -63,7 +63,7 @@ const orderSchema = new mongoose.Schema({
   productId: String,
   buyerName: String,
   address: String,
-  status: String
+  status: String,
 });
 
 const Order = mongoose.model("Order", orderSchema);
@@ -86,18 +86,20 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION ─────────────────────────────
+// ─── GEMINI AI FUNCTION (FIXED) ─────────────────────────────
 async function extractProductInfo(message) {
-  const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash"
-  });
+  try {
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+    });
 
-  const prompt = `
+    const prompt = `
 You are a marketplace AI.
 
-Extract products from message.
+Extract items from message.
 
-Return ONLY JSON:
+Return ONLY valid JSON:
+
 {
   "items": [
     {
@@ -113,11 +115,30 @@ Rules:
 - NO explanation
 `;
 
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const text = response.text();
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
 
-  return safeJSONParse(text);
+    // clean Gemini output
+    text = text
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    return JSON.parse(text);
+  } catch (err) {
+    console.error("Gemini error:", err);
+
+    // fallback safe response
+    return {
+      items: [
+        {
+          name: "unknown",
+          quantity: "1 unit",
+        },
+      ],
+    };
+  }
 }
 
 // ─── ROUTES ─────────────────────────────
@@ -127,7 +148,7 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend Running");
 });
 
-// CHAT (MAIN AI ROUTE)
+// CHAT (AI)
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
@@ -142,11 +163,11 @@ app.post("/chat", async (req, res) => {
       name: item.name,
       quantity: item.quantity,
       suggestedPrice: suggestMarketPrice(item.name),
-      imageUrl: null
+      imageUrl: null,
     }));
 
     const product = new Product({
-      items: itemsWithPrices
+      items: itemsWithPrices,
     });
 
     await product.save();
@@ -155,9 +176,8 @@ app.post("/chat", async (req, res) => {
       message: "AI processed successfully",
       items: itemsWithPrices,
       productId: product._id,
-      nextStep: "UPLOAD_IMAGES"
+      nextStep: "UPLOAD_IMAGES",
     });
-
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Server error" });
@@ -184,16 +204,15 @@ app.post("/buy", async (req, res) => {
       productId,
       buyerName,
       address,
-      status: "PLACED"
+      status: "PLACED",
     });
 
     await order.save();
 
     res.json({
       message: "Order placed",
-      order
+      order,
     });
-
   } catch (err) {
     res.status(500).json({ error: "Buy error" });
   }
@@ -217,9 +236,11 @@ app.post("/update-status", async (req, res) => {
 
   res.json({
     message: "Updated",
-    order: updated
+    order: updated,
   });
 });
+
+// UPLOAD IMAGE (SAFE VERSION)
 app.post("/upload-image", async (req, res) => {
   try {
     const { productId, itemIndex, imageUrl } = req.body;
@@ -230,10 +251,13 @@ app.post("/upload-image", async (req, res) => {
       return res.status(404).json({ error: "Product not found" });
     }
 
+    if (!product.items[itemIndex]) {
+      return res.status(400).json({ error: "Invalid item index" });
+    }
+
     product.items[itemIndex].imageUrl = imageUrl;
 
-    // If all images uploaded → mark LIVE
-    const allUploaded = product.items.every(i => i.imageUrl);
+    const allUploaded = product.items.every((i) => i.imageUrl);
 
     if (allUploaded) {
       product.status = "LIVE";
@@ -243,11 +267,10 @@ app.post("/upload-image", async (req, res) => {
 
     res.json({
       message: "Image uploaded successfully",
-      product
+      product,
     });
-
   } catch (err) {
-    console.error(err);
+    console.error("Upload error:", err);
     res.status(500).json({ error: "Upload failed" });
   }
 });
