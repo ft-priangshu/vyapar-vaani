@@ -15,12 +15,16 @@ app.use(bodyParser.json());
 console.log("MONGO_URI =", process.env.MONGO_URI);
 
 // ─── MongoDB Connection ───────────────────────────────────────
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log("MongoDB connected"))
-.catch((err) => console.error("MongoDB connection error:", err));
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("MongoDB connected");
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+  }
+};
+
+connectDB();
 
 // ─── Models ───────────────────────────────────────────────────
 
