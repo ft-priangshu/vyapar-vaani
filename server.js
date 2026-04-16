@@ -8,48 +8,58 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
 const app = express();
 
 // ─── Middleware ───────────────────────────────────────────────
 app.use(cors());
 app.use(bodyParser.json());
+
+// ─── ENV CHECK ───────────────────────────────────────────────
 console.log("MONGO_URI =", process.env.MONGO_URI);
 
+// ─── GEMINI SETUP ─────────────────────────────────────────────
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 // ─── MongoDB Connection ───────────────────────────────────────
-const connectDB = async () => {
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch((err) => console.error("MongoDB connection error:", err));
+
+// ─── SAFE JSON PARSER ─────────────────────────────────────────
+function safeJSONParse(text) {
   try {
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log("MongoDB connected");
+    return JSON.parse(text);
   } catch (err) {
-    console.error("MongoDB connection error:", err);
+    const cleaned = text
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    return JSON.parse(cleaned);
   }
-};
+}
 
-connectDB();
-
-// ─── Models ───────────────────────────────────────────────────
-
-// Product Model
+// ─── MODEL ────────────────────────────────────────────────────
 const productSchema = new mongoose.Schema({
   name: String,
   quantity: String,
   price: String,
   suggestedPrice: String,
 });
+
 const Product = mongoose.model("Product", productSchema);
 
-// Order Model
 const orderSchema = new mongoose.Schema({
   productId: String,
   buyerName: String,
   address: String,
   status: String,
 });
+
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── Helper: Suggest a market price ──────────────────────────
+// ─── MARKET PRICE LOGIC ───────────────────────────────────────
 function suggestMarketPrice(productName) {
   const name = productName.toLowerCase();
 
@@ -67,7 +77,7 @@ function suggestMarketPrice(productName) {
   return "₹100 (estimated market price)";
 }
 
-// ─── Helper: Extract product info from message ────────────────
+// ─── GEMINI AI FUNCTION ───────────────────────────────────────
 async function extractProductInfo(message) {
   const model = genAI.getGenerativeModel({
     model: "gemini-1.5-flash",
@@ -92,7 +102,7 @@ Return ONLY valid JSON:
 Rules:
 - Detect multiple items
 - If quantity missing → "1 unit"
-- Output ONLY JSON (no text)
+- Output ONLY JSON (no explanation)
 
 Message: ${message}
 `;
@@ -101,45 +111,61 @@ Message: ${message}
   const response = await result.response;
   const text = response.text();
 
-  return JSON.parse(text);
+  return safeJSONParse(text);
 }
 
-// ─── Routes ───────────────────────────────────────────────────
+// ─── ROUTES ───────────────────────────────────────────────────
 
-// Root test route
+// ROOT
 app.get("/", (req, res) => {
   res.send("🚀 Vyapar Vaani Backend is running");
 });
 
-// Chat route
-const aiResult = await extractProductInfo(message);
+// CHAT (FIXED)
+app.post("/chat", async (req, res) => {
+  try {
+    const { message } = req.body;
 
-const itemsWithPrices = aiResult.items.map(item => ({
-  name: item.name,
-  quantity: item.quantity,
-  suggestedPrice: suggestMarketPrice(item.name)
-}));
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
+    }
 
-const newProduct = new Product({
-  items: itemsWithPrices
+    const aiResult = await extractProductInfo(message);
+
+    const itemsWithPrices = aiResult.items.map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      suggestedPrice: suggestMarketPrice(item.name),
+    }));
+
+    const newProduct = new Product({
+      name: itemsWithPrices[0]?.name || "Unknown",
+      quantity: itemsWithPrices[0]?.quantity || "1 unit",
+      price: "Not set",
+      suggestedPrice: itemsWithPrices[0]?.suggestedPrice || "₹100",
+    });
+
+    await newProduct.save();
+
+    res.json({
+      message: "AI extracted items successfully",
+      items: itemsWithPrices,
+      productId: newProduct._id,
+      nextStep: "UPLOAD_IMAGES",
+    });
+  } catch (err) {
+    console.error("Error in /chat:", err);
+    res.status(500).json({ error: "Something went wrong" });
+  }
 });
 
-await newProduct.save();
-
-res.json({
-  message: "AI extracted items successfully",
-  items: itemsWithPrices,
-  productId: newProduct._id,
-  nextStep: "UPLOAD_IMAGES"
-});
-
-// Get products
+// PRODUCTS
 app.get("/products", async (req, res) => {
   const products = await Product.find();
   res.json(products);
 });
 
-// Buy product
+// BUY
 app.post("/buy", async (req, res) => {
   try {
     const { productId, buyerName, address } = req.body;
@@ -167,13 +193,13 @@ app.post("/buy", async (req, res) => {
   }
 });
 
-// Get orders
+// ORDERS
 app.get("/orders", async (req, res) => {
   const orders = await Order.find();
   res.json(orders);
 });
 
-// Update order status
+// UPDATE STATUS
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, status } = req.body;
@@ -193,7 +219,7 @@ app.post("/update-status", async (req, res) => {
   }
 });
 
-// ─── Start Server ─────────────────────────────────────────────
+// ─── START SERVER ─────────────────────────────────────────────
 app.listen(3000, () => {
   console.log("🚀 Server is running on http://localhost:3000");
 });
