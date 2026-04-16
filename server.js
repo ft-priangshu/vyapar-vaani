@@ -10,19 +10,19 @@ app.use(cors());
 app.use(bodyParser.json());
 
 // ─── ENV ─────────────────────────────
-console.log("MONGO_URI =", process.env.MONGO_URI);
-console.log("GEMINI KEY =", !!process.env.GEMINI_API_KEY);
+console.log("MONGO_URI =", !!process.env.MONGO_URI);
+console.log("GEMINI =", !!process.env.GEMINI_API_KEY);
 
 // ─── GEMINI ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── DB CONNECT ─────────────────────────────
+// ─── DB ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB error:", err));
+  .catch((err) => console.log(err));
 
-// ─── TEMP STORAGE FOR SELL CONFIRMATION ─────────────────────────────
+// ─── TEMP SELL STORAGE ─────────────────────────────
 const pendingSales = new Map();
 
 // ─── PRODUCT MODEL ─────────────────────────────
@@ -32,55 +32,42 @@ const productSchema = new mongoose.Schema({
   price: String,
   suggestedPrice: String,
   imageUrl: String,
-  status: {
-    type: String,
-    default: "LIVE"
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
+  status: { type: String, default: "LIVE" },
+  createdAt: { type: Date, default: Date.now }
 });
 
 const Product = mongoose.model("Product", productSchema);
 
-// ─── ORDER MODEL ─────────────────────────────
+// ─── ORDER MODEL (LOGISTICS READY) ─────────────────────────────
 const orderSchema = new mongoose.Schema({
   productId: String,
+  productName: String,
+  quantity: String,
   buyerName: String,
   phone: String,
   address: String,
-  status: {
-    type: String,
-    default: "ORDER_PLACED"
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
+  status: { type: String, default: "PLACED" },
+  assignedTo: { type: String, default: "UNASSIGNED" },
+  createdAt: { type: Date, default: Date.now }
 });
 
 const Order = mongoose.model("Order", orderSchema);
 
 // ─── PRICE ENGINE ─────────────────────────────
-function suggestMarketPrice(name) {
+function getPrice(name) {
   name = (name || "").toLowerCase();
 
-  if (name.includes("rice")) return "₹50/kg";
-  if (name.includes("wheat")) return "₹35/kg";
   if (name.includes("potato")) return "₹20/kg";
   if (name.includes("onion")) return "₹30/kg";
+  if (name.includes("rice")) return "₹50/kg";
+  if (name.includes("wheat")) return "₹35/kg";
   if (name.includes("tomato")) return "₹40/kg";
   if (name.includes("milk")) return "₹55/L";
-  if (name.includes("sugar")) return "₹45/kg";
-  if (name.includes("oil")) return "₹150/L";
-  if (name.includes("flour")) return "₹40/kg";
-  if (name.includes("egg")) return "₹7/piece";
 
   return "₹100 (estimate)";
 }
 
-// ─── CLEAN TEXT HELPERS ─────────────────────────────
+// ─── CLEAN NAME ─────────────────────────────
 function cleanName(name) {
   if (!name) return "unknown";
 
@@ -92,32 +79,29 @@ function cleanName(name) {
     .trim();
 }
 
-// ─── AI EXTRACTION (FIXED FOR ALL SENTENCES) ─────────────────────────────
-async function extractProduct(message) {
+// ─── STRONG AI PARSER (FIXED QUANTITY) ─────────────────────────────
+async function extract(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
-      generationConfig: {
-        responseMimeType: "application/json",
-      },
+      generationConfig: { responseMimeType: "application/json" }
     });
 
     const prompt = `
-Extract product name and quantity from ANY sentence.
-
-Examples:
-"I want to sell 2 kg potato"
-"potato 2 kg"
-"selling rice 5 kg"
-"I have 3 kg onions"
-
-Return JSON ONLY:
-{
-  "name": "",
-  "quantity": ""
-}
+Extract product info STRICTLY.
 
 Message: ${message}
+
+Return JSON:
+{
+  "name": "product",
+  "quantity": "number + unit"
+}
+
+Rules:
+- if "2 kg potato" → name: potato, quantity: 2 kg
+- if sentence form → still extract correctly
+- NEVER ignore numbers
 `;
 
     const result = await model.generateContent(prompt);
@@ -125,112 +109,126 @@ Message: ${message}
 
     text = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
-    return JSON.parse(text);
-  } catch (err) {
+    const data = JSON.parse(text);
+
     return {
-      name: message,
+      name: cleanName(data.name),
+      quantity: data.quantity || "1 unit"
+    };
+  } catch (e) {
+    return {
+      name: cleanName(message),
       quantity: "1 unit"
     };
   }
 }
 
-// ─── CHAT (STEP 1 - ASK CONFIRMATION) ─────────────────────────────
+// ─── CHAT (STEP 1 - ASK PRICE APPROVAL) ─────────────────────────────
 app.post("/chat", async (req, res) => {
   try {
     const { message } = req.body;
 
-    const ai = await extractProduct(message);
+    const data = await extract(message);
 
-    const name = cleanName(ai.name);
-    const quantity = ai.quantity;
-
-    const suggestedPrice = suggestMarketPrice(name);
+    const suggestedPrice = getPrice(data.name);
 
     const tempId = Date.now().toString();
 
     pendingSales.set(tempId, {
-      name,
-      quantity,
+      name: data.name,
+      quantity: data.quantity,
       suggestedPrice
     });
 
     res.json({
       message: "Do you want to sell at this price?",
       tempId,
-      detected: {
-        name,
-        quantity
+      product: {
+        name: data.name,
+        quantity: data.quantity,
+        suggestedPrice
       },
-      suggestedPrice,
       nextStep: "CONFIRMATION_REQUIRED"
     });
 
   } catch (err) {
-    console.error("CHAT ERROR:", err);
+    console.log(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// ─── CONFIRM SELL (STEP 2) ─────────────────────────────
+// ─── CONFIRM SELL (FIXED MARKETPLACE ISSUE) ─────────────────────────────
 app.post("/confirm-sell", async (req, res) => {
   try {
     const { tempId, confirm } = req.body;
 
     if (!pendingSales.has(tempId)) {
-      return res.status(400).json({ error: "Invalid session" });
+      return res.status(400).json({ error: "Session expired" });
     }
 
     const data = pendingSales.get(tempId);
 
+    // ❌ CANCEL
     if (!confirm) {
       pendingSales.delete(tempId);
       return res.json({ message: "Sale cancelled" });
     }
 
+    // ✔ CONFIRM → SAVE PRODUCT (FIXED MARKETPLACE ISSUE)
     const product = new Product({
       name: data.name,
       quantity: data.quantity,
       suggestedPrice: data.suggestedPrice,
-      imageUrl: null
+      status: "LIVE"
     });
 
     await product.save();
-
     pendingSales.delete(tempId);
 
-    res.json({
-      message: "Product listed successfully",
+    return res.json({
+      message: "OK, product is getting listed on marketplace",
       product
     });
 
   } catch (err) {
+    console.log(err);
     res.status(500).json({ error: "Confirm error" });
   }
 });
 
-// ─── GET PRODUCTS (MARKETPLACE) ─────────────────────────────
+// ─── MARKETPLACE ─────────────────────────────
 app.get("/products", async (req, res) => {
   const products = await Product.find().sort({ createdAt: -1 });
   res.json(products);
 });
 
-// ─── BUY (LOGISTICS READY) ─────────────────────────────
+// ─── BUY (LOGISTICS SYSTEM FIXED) ─────────────────────────────
 app.post("/buy", async (req, res) => {
   try {
     const { productId, buyerName, phone, address } = req.body;
 
+    const product = await Product.findById(productId);
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
     const order = new Order({
       productId,
+      productName: product.name,
+      quantity: product.quantity,
       buyerName,
       phone,
-      address
+      address,
+      status: "PLACED",
+      assignedTo: "PENDING_ADMIN"
     });
 
     await order.save();
 
     res.json({
       message: "Order placed successfully",
-      orderId: order._id
+      order
     });
 
   } catch (err) {
@@ -238,13 +236,29 @@ app.post("/buy", async (req, res) => {
   }
 });
 
-// ─── ORDERS ─────────────────────────────
+// ─── LOGISTICS DASHBOARD (ADMIN USE) ─────────────────────────────
 app.get("/orders", async (req, res) => {
   const orders = await Order.find().sort({ createdAt: -1 });
   res.json(orders);
 });
 
-// ─── UPDATE ORDER STATUS ─────────────────────────────
+// ─── ADMIN ASSIGNMENT ─────────────────────────────
+app.post("/assign-order", async (req, res) => {
+  const { orderId, employee } = req.body;
+
+  const order = await Order.findByIdAndUpdate(
+    orderId,
+    { assignedTo: employee, status: "ASSIGNED" },
+    { new: true }
+  );
+
+  res.json({
+    message: "Order assigned",
+    order
+  });
+});
+
+// ─── STATUS UPDATE (SENT TO SELLER CHAT) ─────────────────────────────
 app.post("/update-status", async (req, res) => {
   const { orderId, status } = req.body;
 
@@ -255,37 +269,12 @@ app.post("/update-status", async (req, res) => {
   );
 
   res.json({
-    message: "Updated",
+    message: "Status updated",
     order: updated
   });
 });
 
-// ─── UPLOAD IMAGE (UNCHANGED BUT SAFE) ─────────────────────────────
-app.post("/upload-image", async (req, res) => {
-  try {
-    const { productId, itemIndex, imageUrl } = req.body;
-
-    const product = await Product.findById(productId);
-
-    if (!product || !product.items) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    product.items[itemIndex].imageUrl = imageUrl;
-
-    await product.save();
-
-    res.json({
-      message: "Image uploaded",
-      product
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: "Upload failed" });
-  }
-});
-
-// ─── START SERVER ─────────────────────────────
+// ─── SERVER ─────────────────────────────
 app.listen(3000, () => {
-  console.log("Server running on port 3000");
+  console.log("Server running on 3000");
 });
