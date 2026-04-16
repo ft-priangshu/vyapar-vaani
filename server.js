@@ -6,7 +6,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
 
-// ─── Middleware ─────────────────────────────
+// ─── MIDDLEWARE ─────────────────────────────
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -17,7 +17,7 @@ console.log("GEMINI KEY EXISTS =", !!process.env.GEMINI_API_KEY);
 // ─── GEMINI SETUP ─────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── MONGODB CONNECT ─────────────────────────────
+// ─── MONGODB CONNECTION ─────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
@@ -55,9 +55,9 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── MARKET PRICE LOGIC ─────────────────────────────
+// ─── MARKET PRICE FUNCTION ─────────────────────────────
 function suggestMarketPrice(name) {
-  name = name.toLowerCase();
+  name = (name || "").toLowerCase();
 
   if (name.includes("rice")) return "₹50/kg";
   if (name.includes("wheat")) return "₹35/kg";
@@ -73,18 +73,21 @@ function suggestMarketPrice(name) {
   return "₹100 (estimate)";
 }
 
-// ─── GEMINI AI FUNCTION (FIXED FINAL VERSION) ─────────────────────────────
+// ─── GEMINI AI FUNCTION (FIXED FINAL) ─────────────────────────────
 async function extractProductInfo(message) {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash",
       generationConfig: {
-        responseMimeType: "application/json"
-      }
+        temperature: 0,
+        responseMimeType: "application/json",
+      },
     });
 
     const prompt = `
-Extract products from the message.
+You are a strict JSON API.
+
+Extract products from user message.
 
 Return ONLY valid JSON:
 
@@ -98,25 +101,22 @@ Return ONLY valid JSON:
 }
 
 Rules:
-- Extract ALL products
+- No explanation
+- No markdown
+- Always valid JSON
 - If quantity missing → "1 unit"
-- NO explanation
-- NO markdown
-- NO extra text
 
 Message:
-${message}
+"""${message}"""
 `;
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
     let text = response.text();
 
-    // FIRST TRY DIRECT PARSE
     try {
       return JSON.parse(text);
     } catch (err) {
-      // CLEAN AND RETRY
       text = text
         .replace(/```json/g, "")
         .replace(/```/g, "")
@@ -142,7 +142,7 @@ ${message}
 
 // HOME
 app.get("/", (req, res) => {
-  res.send("🚀 Backend Running");
+  res.send("🚀 Backend Running Successfully");
 });
 
 // CHAT (AI CORE)
@@ -155,6 +155,8 @@ app.post("/chat", async (req, res) => {
     }
 
     const aiResult = await extractProductInfo(message);
+
+    console.log("RAW AI RESULT:", aiResult);
 
     const itemsWithPrices = aiResult.items.map((item) => ({
       name: item.name,
@@ -175,7 +177,6 @@ app.post("/chat", async (req, res) => {
       productId: product._id,
       nextStep: "UPLOAD_IMAGES",
     });
-
   } catch (err) {
     console.error("Chat error:", err);
     res.status(500).json({ error: "Server error" });
@@ -222,7 +223,7 @@ app.get("/orders", async (req, res) => {
   res.json(orders);
 });
 
-// UPDATE ORDER
+// UPDATE STATUS
 app.post("/update-status", async (req, res) => {
   const { orderId, status } = req.body;
 
@@ -267,7 +268,6 @@ app.post("/upload-image", async (req, res) => {
       message: "Image uploaded successfully",
       product,
     });
-
   } catch (err) {
     console.error("Upload error:", err);
     res.status(500).json({ error: "Upload failed" });
