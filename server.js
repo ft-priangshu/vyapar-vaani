@@ -220,6 +220,37 @@ app.post("/update-status", async (req, res) => {
     order: updated
   });
 });
+app.post("/upload-image", async (req, res) => {
+  try {
+    const { productId, itemIndex, imageUrl } = req.body;
+
+    const product = await Product.findById(productId);
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    product.items[itemIndex].imageUrl = imageUrl;
+
+    // If all images uploaded → mark LIVE
+    const allUploaded = product.items.every(i => i.imageUrl);
+
+    if (allUploaded) {
+      product.status = "LIVE";
+    }
+
+    await product.save();
+
+    res.json({
+      message: "Image uploaded successfully",
+      product
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Upload failed" });
+  }
+});
 
 // ─── START SERVER ─────────────────────────────
 app.listen(3000, () => {
