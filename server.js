@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
 
-// ───────────────── GEMINI (kept, but NOT used for extraction) ─────────────────
+// ───────────────── GEMINI (kept but not used for extraction) ─────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ───────────────── DB ─────────────────
@@ -22,6 +22,8 @@ mongoose
   .catch((err) => console.error("MongoDB error:", err));
 
 // ───────────────── SCHEMAS ─────────────────
+
+// PRODUCTS
 const productSchema = new mongoose.Schema({
   sellerId: String,
   name: String,
@@ -32,6 +34,7 @@ const productSchema = new mongoose.Schema({
 });
 const Product = mongoose.model("Product", productSchema);
 
+// ORDERS
 const orderSchema = new mongoose.Schema({
   productId: String,
   productName: String,
@@ -40,10 +43,20 @@ const orderSchema = new mongoose.Schema({
   buyerName: String,
   phone: String,
   address: String,
-  status: { type: String, default: "PLACED" },
+  status: { type: String, default: "PLACED" }, 
+  // PLACED → PICKUP_PLANNED → PICKED → DELIVERED
   createdAt: { type: Date, default: Date.now }
 });
 const Order = mongoose.model("Order", orderSchema);
+
+// NOTIFICATIONS (for seller chat updates)
+const notificationSchema = new mongoose.Schema({
+  sellerId: String,
+  orderId: String,
+  message: String,
+  createdAt: { type: Date, default: Date.now }
+});
+const Notification = mongoose.model("Notification", notificationSchema);
 
 // ───────────────── MEMORY ─────────────────
 const pending = {};
@@ -62,28 +75,26 @@ function getPrice(name = "") {
   return "₹100 (estimate)";
 }
 
-// ───────────────── SELL DETECTOR ─────────────────
+// ───────────────── SELL INTENT DETECTOR ─────────────────
 function isSellIntent(message) {
   const msg = message.toLowerCase();
 
   return (
     msg.includes("sell") ||
     msg.includes("bechna") ||
-    /\d+/.test(msg) // contains number → assume selling
+    /\d+/.test(msg)
   );
 }
 
-// ───────────────── MANUAL ITEM EXTRACTOR (CORE FIX) ─────────────────
+// ───────────────── MANUAL EXTRACTION (FINAL FIX) ─────────────────
 function extractItemsManual(message) {
   const msg = message.toLowerCase().trim();
-
   const words = msg.split(/\s+/);
 
   let quantity = "1 unit";
   let name = "";
 
   for (let i = 0; i < words.length; i++) {
-    // detect number
     if (!isNaN(words[i])) {
       quantity = words[i] + " unit";
 
@@ -94,7 +105,6 @@ function extractItemsManual(message) {
         quantity = words[i] + " " + words[i + 1];
       }
     } else {
-      // ignore filler words
       if (!name && !["sell", "i", "want", "to", "bechna", "hai"].includes(words[i])) {
         name = words[i];
       }
@@ -109,7 +119,7 @@ function extractItemsManual(message) {
   ];
 }
 
-// ───────────────── CHAT API ─────────────────
+// ───────────────── CHAT ─────────────────
 app.post("/chat", async (req, res) => {
   try {
     const { sellerId, message } = req.body;
@@ -120,7 +130,6 @@ app.post("/chat", async (req, res) => {
 
     const isSell = isSellIntent(message);
 
-    // ───── NORMAL CHAT ─────
     if (!isSell) {
       return res.json({
         type: "CHAT",
@@ -129,7 +138,6 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // ───── SELL FLOW ─────
     const items = extractItemsManual(message);
 
     const enriched = items.map(i => {
@@ -145,8 +153,7 @@ app.post("/chat", async (req, res) => {
 
     const tempId = Date.now().toString();
 
-    global.pending = global.pending || {};
-    global.pending[tempId] = {
+    pending[tempId] = {
       sellerId,
       items: enriched
     };
@@ -170,12 +177,12 @@ app.post("/confirm-sell", async (req, res) => {
   try {
     const { tempId, confirm } = req.body;
 
-    if (!global.pending?.[tempId]) {
+    if (!pending[tempId]) {
       return res.status(400).json({ error: "Session expired" });
     }
 
-    const data = global.pending[tempId];
-    delete global.pending[tempId];
+    const data = pending[tempId];
+    delete pending[tempId];
 
     if (!confirm) {
       return res.json({ message: "Cancelled" });
@@ -223,7 +230,8 @@ app.post("/buy", async (req, res) => {
       sellerId: product.sellerId,
       buyerName,
       phone,
-      address
+      address,
+      status: "PLACED"
     });
 
     res.json({
@@ -237,7 +245,71 @@ app.post("/buy", async (req, res) => {
   }
 });
 
-// ───────────────── START SERVER ─────────────────
+// ───────────────── LOGISTICS: GET ORDERS ─────────────────
+app.get("/orders", async (req, res) => {
+  try {
+    const orders = await Order.find().sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: "failed to fetch orders" });
+  }
+});
+
+// ───────────────── LOGISTICS: UPDATE STATUS ─────────────────
+app.patch("/orders/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    const valid = ["PICKUP_PLANNED", "PICKED", "DELIVERED"];
+    if (!valid.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    let message = "";
+
+    if (status === "PICKUP_PLANNED") {
+      message = `📦 Pickup planned for ${order.productName}`;
+    } else if (status === "PICKED") {
+      message = `🚚 Your product "${order.productName}" has been picked up`;
+    } else if (status === "DELIVERED") {
+      message = `✅ Your product "${order.productName}" has been delivered`;
+    }
+
+    await Notification.create({
+      sellerId: order.sellerId,
+      orderId: order._id,
+      message
+    });
+
+    res.json(order);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "status update failed" });
+  }
+});
+
+// ───────────────── NOTIFICATIONS ─────────────────
+app.get("/notifications/:sellerId", async (req, res) => {
+  try {
+    const data = await Notification.find({ sellerId: req.params.sellerId })
+      .sort({ createdAt: -1 });
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: "failed to fetch notifications" });
+  }
+});
+
+// ───────────────── SERVER ─────────────────
 app.listen(3000, () => {
   console.log("Server running on port 3000");
 });
