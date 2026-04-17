@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
 
-// ───────────────── GEMINI ─────────────────
+// ───────────────── GEMINI (kept, but NOT used for extraction) ─────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ───────────────── DB ─────────────────
@@ -62,73 +62,54 @@ function getPrice(name = "") {
   return "₹100 (estimate)";
 }
 
-// ───────────────── STRONG SELL DETECTOR (NEW CORE FIX) ─────────────────
-function forceIntent(message, ai) {
+// ───────────────── SELL DETECTOR ─────────────────
+function isSellIntent(message) {
   const msg = message.toLowerCase();
 
-  // Strong SELL detection (English + Hindi + shorthand)
-  const sellPattern =
+  return (
     msg.includes("sell") ||
     msg.includes("bechna") ||
-    msg.includes("bechna hai") ||
-    msg.includes("sell karna") ||
-    /\d+\s?(kg|g|gram|grams|litre|liter|pcs|pieces)/.test(msg) ||
-    /^[a-z\s]+ \d+/.test(msg); // "potato 2 kg"
+    /\d+/.test(msg) // contains number → assume selling
+  );
+}
 
-  if (sellPattern) {
-    ai.type = "SELL";
+// ───────────────── MANUAL ITEM EXTRACTOR (CORE FIX) ─────────────────
+function extractItemsManual(message) {
+  const msg = message.toLowerCase().trim();
+
+  const words = msg.split(/\s+/);
+
+  let quantity = "1 unit";
+  let name = "";
+
+  for (let i = 0; i < words.length; i++) {
+    // detect number
+    if (!isNaN(words[i])) {
+      quantity = words[i] + " unit";
+
+      if (
+        words[i + 1] &&
+        ["kg", "g", "gram", "grams", "litre", "liter", "pcs", "pieces"].includes(words[i + 1])
+      ) {
+        quantity = words[i] + " " + words[i + 1];
+      }
+    } else {
+      // ignore filler words
+      if (!name && !["sell", "i", "want", "to", "bechna", "hai"].includes(words[i])) {
+        name = words[i];
+      }
+    }
   }
 
-  return ai;
+  return [
+    {
+      name: name || "unknown",
+      quantity
+    }
+  ];
 }
 
-// ───────────────── SAFE GEMINI ROUTER ─────────────────
-async function routeMessage(message) {
-  try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: { responseMimeType: "application/json" }
-    });
-
-    const prompt = `
-You are a STRICT marketplace AI.
-
-CLASSIFICATION RULES:
-- SELL = user selling or mentioning product with quantity
-- CHAT = greetings or general talk
-- QUERY = asking price/info
-
-Message: "${message}"
-
-IMPORTANT:
-If message contains product + quantity → ALWAYS SELL
-
-Return ONLY JSON:
-{
-  "type": "SELL | BUY | CHAT | QUERY",
-  "items": [
-    { "name": "", "quantity": "" }
-  ]
-}
-`;
-
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
-
-  } catch (err) {
-    console.error("Router error:", err);
-
-    return {
-      type: "CHAT",
-      items: []
-    };
-  }
-}
-
-// ───────────────── CHAT API (FINAL FIXED) ─────────────────
+// ───────────────── CHAT API ─────────────────
 app.post("/chat", async (req, res) => {
   try {
     const { sellerId, message } = req.body;
@@ -137,32 +118,30 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "sellerId + message required" });
     }
 
-    let ai = await routeMessage(message);
-
-    // 🔥 FORCE FIX (IMPORTANT)
-    ai = forceIntent(message, ai);
-
-    const type = ai?.type || "CHAT";
-    const items = Array.isArray(ai?.items) ? ai.items : [];
+    const isSell = isSellIntent(message);
 
     // ───── NORMAL CHAT ─────
-    if (type !== "SELL") {
+    if (!isSell) {
       return res.json({
-        type,
-        reply:
-          type === "CHAT"
-            ? "Got it 👍 How can I help you?"
-            : "Here is the info you asked for",
-        items
+        type: "CHAT",
+        reply: "Got it 👍 How can I help you?",
+        items: []
       });
     }
 
     // ───── SELL FLOW ─────
-    const enriched = items.map(i => ({
-      name: i.name || "unknown",
-      quantity: i.quantity || "1 unit",
-      suggestedPrice: getPrice(i.name || "")
-    }));
+    const items = extractItemsManual(message);
+
+    const enriched = items.map(i => {
+      const name = (i.name || "").toLowerCase().trim();
+      const quantity = (i.quantity || "1 unit").trim();
+
+      return {
+        name: name || "unknown",
+        quantity,
+        suggestedPrice: getPrice(name)
+      };
+    });
 
     const tempId = Date.now().toString();
 
