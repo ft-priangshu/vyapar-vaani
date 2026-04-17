@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const axios = require("axios"); // ✅ ADDED
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
@@ -44,12 +45,11 @@ const orderSchema = new mongoose.Schema({
   phone: String,
   address: String,
   status: { type: String, default: "PLACED" }, 
-  // PLACED → PICKUP_PLANNED → PICKED → DELIVERED
   createdAt: { type: Date, default: Date.now }
 });
 const Order = mongoose.model("Order", orderSchema);
 
-// NOTIFICATIONS (for seller chat updates)
+// NOTIFICATIONS
 const notificationSchema = new mongoose.Schema({
   sellerId: String,
   orderId: String,
@@ -78,15 +78,10 @@ function getPrice(name = "") {
 // ───────────────── SELL INTENT DETECTOR ─────────────────
 function isSellIntent(message) {
   const msg = message.toLowerCase();
-
-  return (
-    msg.includes("sell") ||
-    msg.includes("bechna") ||
-    /\d+/.test(msg)
-  );
+  return msg.includes("sell") || msg.includes("bechna") || /\d+/.test(msg);
 }
 
-// ───────────────── MANUAL EXTRACTION (FINAL FIX) ─────────────────
+// ───────────────── MANUAL EXTRACTION ─────────────────
 function extractItemsManual(message) {
   const msg = message.toLowerCase().trim();
   const words = msg.split(/\s+/);
@@ -111,12 +106,7 @@ function extractItemsManual(message) {
     }
   }
 
-  return [
-    {
-      name: name || "unknown",
-      quantity
-    }
-  ];
+  return [{ name: name || "unknown", quantity }];
 }
 
 // ───────────────── CHAT ─────────────────
@@ -140,23 +130,15 @@ app.post("/chat", async (req, res) => {
 
     const items = extractItemsManual(message);
 
-    const enriched = items.map(i => {
-      const name = (i.name || "").toLowerCase().trim();
-      const quantity = (i.quantity || "1 unit").trim();
-
-      return {
-        name: name || "unknown",
-        quantity,
-        suggestedPrice: getPrice(name)
-      };
-    });
+    const enriched = items.map(i => ({
+      name: i.name || "unknown",
+      quantity: i.quantity,
+      suggestedPrice: getPrice(i.name)
+    }));
 
     const tempId = Date.now().toString();
 
-    pending[tempId] = {
-      sellerId,
-      items: enriched
-    };
+    pending[tempId] = { sellerId, items: enriched };
 
     return res.json({
       type: "SELL",
@@ -204,15 +186,13 @@ app.post("/confirm-sell", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "confirm failed" });
   }
 });
 
 // ───────────────── MARKETPLACE ─────────────────
 app.get("/products", async (req, res) => {
-  const products = await Product.find({ status: "LIVE" });
-  res.json(products);
+  res.json(await Product.find({ status: "LIVE" }));
 });
 
 // ───────────────── BUY ─────────────────
@@ -230,40 +210,25 @@ app.post("/buy", async (req, res) => {
       sellerId: product.sellerId,
       buyerName,
       phone,
-      address,
-      status: "PLACED"
+      address
     });
 
-    res.json({
-      message: "Order placed successfully",
-      order
-    });
+    res.json({ message: "Order placed successfully", order });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "buy failed" });
   }
 });
 
-// ───────────────── LOGISTICS: GET ORDERS ─────────────────
+// ───────────────── GET ORDERS ─────────────────
 app.get("/orders", async (req, res) => {
-  try {
-    const orders = await Order.find().sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (err) {
-    res.status(500).json({ error: "failed to fetch orders" });
-  }
+  res.json(await Order.find().sort({ createdAt: -1 }));
 });
 
-// ───────────────── LOGISTICS: UPDATE STATUS ─────────────────
+// ───────────────── UPDATE STATUS (UPDATED) ─────────────────
 app.patch("/orders/:id/status", async (req, res) => {
   try {
     const { status } = req.body;
-
-    const valid = ["PICKUP_PLANNED", "PICKED", "DELIVERED"];
-    if (!valid.includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
 
     const order = await Order.findByIdAndUpdate(
       req.params.id,
@@ -271,17 +236,11 @@ app.patch("/orders/:id/status", async (req, res) => {
       { new: true }
     );
 
-    if (!order) return res.status(404).json({ error: "Order not found" });
-
     let message = "";
 
-    if (status === "PICKUP_PLANNED") {
-      message = `📦 Pickup planned for ${order.productName}`;
-    } else if (status === "PICKED") {
-      message = `🚚 Your product "${order.productName}" has been picked up`;
-    } else if (status === "DELIVERED") {
-      message = `✅ Your product "${order.productName}" has been delivered`;
-    }
+    if (status === "PICKUP_PLANNED") message = "Pickup Planned";
+    if (status === "PICKED") message = "Picked";
+    if (status === "DELIVERED") message = "Delivered";
 
     await Notification.create({
       sellerId: order.sellerId,
@@ -289,24 +248,33 @@ app.patch("/orders/:id/status", async (req, res) => {
       message
     });
 
+    // ✅ SEND TO EXTERNAL CHAT SYSTEM
+    try {
+      console.log("Sending to chat system:", message);
+
+      await axios.post("https://chatsystemacm.lovable.app/api/messages", {
+        sellerId: order.sellerId,
+        orderId: order._id,
+        message,
+        status
+      });
+
+    } catch (e) {
+      console.error("Chat forward failed:", e.message);
+    }
+
     res.json(order);
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "status update failed" });
   }
 });
 
 // ───────────────── NOTIFICATIONS ─────────────────
 app.get("/notifications/:sellerId", async (req, res) => {
-  try {
-    const data = await Notification.find({ sellerId: req.params.sellerId })
-      .sort({ createdAt: -1 });
-
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: "failed to fetch notifications" });
-  }
+  res.json(
+    await Notification.find({ sellerId: req.params.sellerId }).sort({ createdAt: -1 })
+  );
 });
 
 // ───────────────── SERVER ─────────────────
