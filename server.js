@@ -8,20 +8,20 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ─── ENV CHECK ─────────────────────────────
+// ───────────────── ENV ─────────────────
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
 
-// ─── GEMINI ─────────────────────────────
+// ───────────────── GEMINI ─────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ─── DB CONNECT ─────────────────────────────
+// ───────────────── DB ─────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch((err) => console.error("MongoDB error:", err));
 
-// ─── SCHEMAS ─────────────────────────────
+// ───────────────── SCHEMAS ─────────────────
 const productSchema = new mongoose.Schema({
   sellerId: String,
   name: String,
@@ -30,7 +30,6 @@ const productSchema = new mongoose.Schema({
   status: { type: String, default: "LIVE" },
   createdAt: { type: Date, default: Date.now }
 });
-
 const Product = mongoose.model("Product", productSchema);
 
 const orderSchema = new mongoose.Schema({
@@ -44,13 +43,12 @@ const orderSchema = new mongoose.Schema({
   status: { type: String, default: "PLACED" },
   createdAt: { type: Date, default: Date.now }
 });
-
 const Order = mongoose.model("Order", orderSchema);
 
-// ─── TEMP STORAGE ─────────────────────────────
+// ───────────────── MEMORY ─────────────────
 const pending = {};
 
-// ─── PRICE ENGINE ─────────────────────────────
+// ───────────────── PRICE ENGINE ─────────────────
 function getPrice(name = "") {
   const n = name.toLowerCase();
 
@@ -64,7 +62,27 @@ function getPrice(name = "") {
   return "₹100 (estimate)";
 }
 
-// ─── SAFE GEMINI ROUTER ─────────────────────────────
+// ───────────────── STRONG SELL DETECTOR (NEW CORE FIX) ─────────────────
+function forceIntent(message, ai) {
+  const msg = message.toLowerCase();
+
+  // Strong SELL detection (English + Hindi + shorthand)
+  const sellPattern =
+    msg.includes("sell") ||
+    msg.includes("bechna") ||
+    msg.includes("bechna hai") ||
+    msg.includes("sell karna") ||
+    /\d+\s?(kg|g|gram|grams|litre|liter|pcs|pieces)/.test(msg) ||
+    /^[a-z\s]+ \d+/.test(msg); // "potato 2 kg"
+
+  if (sellPattern) {
+    ai.type = "SELL";
+  }
+
+  return ai;
+}
+
+// ───────────────── SAFE GEMINI ROUTER ─────────────────
 async function routeMessage(message) {
   try {
     const model = genAI.getGenerativeModel({
@@ -73,10 +91,17 @@ async function routeMessage(message) {
     });
 
     const prompt = `
-Classify message into:
-SELL | BUY | CHAT | QUERY
+You are a STRICT marketplace AI.
+
+CLASSIFICATION RULES:
+- SELL = user selling or mentioning product with quantity
+- CHAT = greetings or general talk
+- QUERY = asking price/info
 
 Message: "${message}"
+
+IMPORTANT:
+If message contains product + quantity → ALWAYS SELL
 
 Return ONLY JSON:
 {
@@ -88,10 +113,9 @@ Return ONLY JSON:
 `;
 
     const result = await model.generateContent(prompt);
+    const text = result.response.text();
 
-    const text = result?.response?.text?.() || "{}";
     const cleaned = text.replace(/```json|```/g, "").trim();
-
     return JSON.parse(cleaned);
 
   } catch (err) {
@@ -104,7 +128,7 @@ Return ONLY JSON:
   }
 }
 
-// ─── CHAT API (SAFE + STABLE) ─────────────────────────────
+// ───────────────── CHAT API (FINAL FIXED) ─────────────────
 app.post("/chat", async (req, res) => {
   try {
     const { sellerId, message } = req.body;
@@ -113,12 +137,15 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "sellerId + message required" });
     }
 
-    const ai = await routeMessage(message);
+    let ai = await routeMessage(message);
+
+    // 🔥 FORCE FIX (IMPORTANT)
+    ai = forceIntent(message, ai);
 
     const type = ai?.type || "CHAT";
     const items = Array.isArray(ai?.items) ? ai.items : [];
 
-    // ─── NORMAL CHAT / QUERY ─────────────────────────────
+    // ───── NORMAL CHAT ─────
     if (type !== "SELL") {
       return res.json({
         type,
@@ -130,7 +157,7 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // ─── SELL FLOW ─────────────────────────────
+    // ───── SELL FLOW ─────
     const enriched = items.map(i => ({
       name: i.name || "unknown",
       quantity: i.quantity || "1 unit",
@@ -159,7 +186,7 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ─── CONFIRM SELL ─────────────────────────────
+// ───────────────── CONFIRM SELL ─────────────────
 app.post("/confirm-sell", async (req, res) => {
   try {
     const { tempId, confirm } = req.body;
@@ -196,13 +223,13 @@ app.post("/confirm-sell", async (req, res) => {
   }
 });
 
-// ─── MARKETPLACE ─────────────────────────────
+// ───────────────── MARKETPLACE ─────────────────
 app.get("/products", async (req, res) => {
   const products = await Product.find({ status: "LIVE" });
   res.json(products);
 });
 
-// ─── BUY ─────────────────────────────
+// ───────────────── BUY ─────────────────
 app.post("/buy", async (req, res) => {
   try {
     const { productId, buyerName, phone, address } = req.body;
@@ -231,7 +258,7 @@ app.post("/buy", async (req, res) => {
   }
 });
 
-// ─── SERVER ─────────────────────────────
+// ───────────────── START SERVER ─────────────────
 app.listen(3000, () => {
   console.log("Server running on port 3000");
 });
