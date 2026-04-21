@@ -57,43 +57,81 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Notification = mongoose.model("Notification", notificationSchema);
-// ───────────────── VOICE TO TEXT ─────────────────
+const fs = require("fs");
+
+// ───────────────── VOICE TO TEXT (FIXED + DEBUG) ─────────────────
 app.post("/voice", upload.single("audio"), async (req, res) => {
   try {
+    console.log("🎤 Voice endpoint hit");
+
     if (!req.file) {
+      console.log("❌ No file received");
       return res.status(400).json({ error: "No audio file uploaded" });
     }
 
-    // Send audio to Groq Whisper
+    console.log("✅ File received:", req.file.path);
+
+    // Check file exists
+    if (!fs.existsSync(req.file.path)) {
+      console.log("❌ File not saved");
+      return res.status(500).json({ error: "File not saved properly" });
+    }
+
+    // Send to Groq Whisper
+    console.log("🚀 Sending to Groq...");
     const transcription = await groq.audio.transcriptions.create({
-      file: require("fs").createReadStream(req.file.path),
+      file: fs.createReadStream(req.file.path),
       model: "whisper-large-v3"
     });
 
-    const text = transcription.text;
+    console.log("✅ Groq response:", transcription);
 
-    // 🔁 Reuse your existing chat logic
-    const fakeReq = {
-      body: {
-        sellerId: req.body.sellerId,
-        message: text
-      }
+    const text = transcription.text || "";
+
+    if (!text) {
+      console.log("❌ No text extracted");
+      return res.status(500).json({ error: "No speech detected" });
+    }
+
+    console.log("📝 Transcribed Text:", text);
+
+    // ✅ DIRECTLY CALL YOUR EXISTING LOGIC (NO router hack)
+    const items = await extractItemsAI(text);
+
+    console.log("🧠 Extracted items:", items);
+
+    const enriched = await Promise.all(
+      items.map(async (i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        suggestedPrice: await getLivePrice(i.name)
+      }))
+    );
+
+    const tempId = Date.now().toString();
+
+    pending[tempId] = {
+      sellerId: req.body.sellerId,
+      items: enriched
     };
 
-    const fakeRes = {
-      json: (data) => res.json({ ...data, voiceText: text }),
-      status: (code) => res.status(code)
-    };
-
-    // Call your existing /chat logic
-    app._router.handle(fakeReq, fakeRes, require("http").METHODS);
+    return res.json({
+      type: "SELL",
+      message: "Voice processed successfully",
+      voiceText: text,
+      tempId,
+      items: enriched,
+      nextStep: "CONFIRM"
+    });
 
   } catch (err) {
-    console.error("Voice error:", err);
-    res.status(500).json({ error: "Voice processing failed" });
+    console.error("❌ Voice error FULL:", err);
+    res.status(500).json({
+      error: "Voice processing failed",
+      details: err.message
+    });
   }
 });
-
 // ───────────────── MEMORY ─────────────────
 const pending = {};
 
