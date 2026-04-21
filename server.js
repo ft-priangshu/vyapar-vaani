@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const axios = require("axios");
-const Groq = require("groq-sdk"); // ✅ NEW
+const Groq = require("groq-sdk");
 
 const app = express();
 app.use(cors());
@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 // ───────────────── ENV ─────────────────
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GROQ_KEY =", !!process.env.GROQ_API_KEY);
-console.log("MANDI_KEY =", !!process.env.MANDI_API_KEY);
+console.log("MANDI_KEY =", !!process.env.MANDI_API);
 
 // ───────────────── GROQ ─────────────────
 const groq = new Groq({
@@ -64,6 +64,10 @@ const pending = {};
 function getPrice(name = "") {
   const n = name.toLowerCase();
 
+  if (n.includes("onion")) return "₹30/kg";
+  if (n.includes("potato")) return "₹20/kg";
+  if (n.includes("rice")) return "₹50/kg";
+  if (n.includes("wheat")) return "₹35/kg";
   // Vegetables
 if (n.includes("carrot")) return "₹25/kg";
 if (n.includes("cabbage")) return "₹18/kg";
@@ -180,10 +184,12 @@ if (n.includes("bread")) return "₹40/packet";
   return "₹100 (estimate)";
 }
 
-// ───────────────── MANDI API ─────────────────
+// ───────────────── MANDI API (FIXED) ─────────────────
 async function getLivePrice(item) {
   try {
-    const API_KEY = process.env.MANDI_API_KEY;
+    console.log("Searching mandi price for:", item);
+
+    const API_KEY = process.env.MANDI_API;
 
     const url = `https://api.data.gov.in/resource/35985678-0d79-46b4-9ed6-6f13308a1d24?api-key=${API_KEY}&format=json&limit=100`;
 
@@ -191,13 +197,25 @@ async function getLivePrice(item) {
     const records = res.data.records || [];
 
     for (const r of records) {
-      const nameField = r.commodity || "";
-      const priceField = r.modal_price;
+      const nameField =
+        r.commodity ||
+        r.commodity_name ||
+        r.crop ||
+        "";
+
+      const priceField =
+        r.modal_price ||
+        r.price ||
+        r.max_price ||
+        r.min_price;
 
       if (
+        item &&
         nameField.toLowerCase().includes(item.toLowerCase()) &&
         priceField
       ) {
+        console.log("Matched:", nameField, priceField);
+
         const pricePerKg = parseFloat(priceField) / 100;
         return `₹${pricePerKg.toFixed(2)}/kg`;
       }
@@ -217,17 +235,26 @@ function isSellIntent(message) {
   return msg.includes("sell") || msg.includes("bechna") || /\d+/.test(msg);
 }
 
-// ───────────────── FALLBACK EXTRACTION ─────────────────
+// ───────────────── FALLBACK EXTRACTION (FIXED) ─────────────────
 function extractItemsFallback(message) {
   const msg = message.toLowerCase();
 
-  const match = msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s?([a-z]+)/);
+  const match =
+    msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s?([a-z]+)/) ||
+    msg.match(/([a-z]+)\s?(\d+)\s?(kg|g|litre|l|pcs|pieces)/);
 
   if (match) {
-    return [{
-      name: match[3],
-      quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
-    }];
+    if (match[3]) {
+      return [{
+        name: match[3],
+        quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
+      }];
+    } else {
+      return [{
+        name: match[1],
+        quantity: `${match[2]} ${match[3]}`
+      }];
+    }
   }
 
   return [{
@@ -236,7 +263,7 @@ function extractItemsFallback(message) {
   }];
 }
 
-// ───────────────── GROQ AI EXTRACTION ─────────────────
+// ───────────────── GROQ AI EXTRACTION (FIXED) ─────────────────
 async function extractItemsAI(message) {
   try {
     const completion = await groq.chat.completions.create({
@@ -251,13 +278,6 @@ Return ONLY JSON:
 [
  { "name": "item name", "quantity": "number + unit" }
 ]
-
-Examples:
-"2 kg potato and 3 kg onion" → 
-[
- { "name": "potato", "quantity": "2 kg" },
- { "name": "onion", "quantity": "3 kg" }
-]
 `
         },
         {
@@ -270,7 +290,12 @@ Examples:
     let text = completion.choices[0].message.content.trim();
     text = text.replace(/```json|```/g, "").trim();
 
-    const parsed = JSON.parse(text);
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return extractItemsFallback(message);
+    }
 
     return parsed.map(i => ({
       name: (i.name || "unknown").toLowerCase(),
@@ -302,7 +327,6 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // ✅ USING GROQ AI
     const items = await extractItemsAI(message);
 
     const enriched = await Promise.all(
