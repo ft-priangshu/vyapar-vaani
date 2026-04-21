@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk"); // ✅ NEW
 
 const app = express();
 app.use(cors());
@@ -11,11 +11,13 @@ app.use(bodyParser.json());
 
 // ───────────────── ENV ─────────────────
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
-console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
+console.log("GROQ_KEY =", !!process.env.GROQ_API_KEY);
 console.log("MANDI_KEY =", !!process.env.MANDI_API_KEY);
 
-// ───────────────── GEMINI (unused) ─────────────────
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// ───────────────── GROQ ─────────────────
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY
+});
 
 // ───────────────── DB ─────────────────
 mongoose
@@ -178,7 +180,7 @@ if (n.includes("bread")) return "₹40/packet";
   return "₹100 (estimate)";
 }
 
-// ───────────────── MANDI API (FIXED) ─────────────────
+// ───────────────── MANDI API ─────────────────
 async function getLivePrice(item) {
   try {
     const API_KEY = process.env.MANDI_API_KEY;
@@ -189,19 +191,14 @@ async function getLivePrice(item) {
     const records = res.data.records || [];
 
     for (const r of records) {
-      const nameField =
-        r.commodity || r.commodity_name || r.crop || "";
-
-      const priceField =
-        r.modal_price || r.price || r.max_price || r.min_price;
+      const nameField = r.commodity || "";
+      const priceField = r.modal_price;
 
       if (
         nameField.toLowerCase().includes(item.toLowerCase()) &&
         priceField
       ) {
-        const pricePerQuintal = parseFloat(priceField);
-        const pricePerKg = pricePerQuintal / 100;
-
+        const pricePerKg = parseFloat(priceField) / 100;
         return `₹${pricePerKg.toFixed(2)}/kg`;
       }
     }
@@ -214,38 +211,76 @@ async function getLivePrice(item) {
   }
 }
 
-// ───────────────── SELL INTENT DETECTOR ─────────────────
+// ───────────────── SELL INTENT ─────────────────
 function isSellIntent(message) {
   const msg = message.toLowerCase();
   return msg.includes("sell") || msg.includes("bechna") || /\d+/.test(msg);
 }
 
-// ───────────────── MANUAL EXTRACTION ─────────────────
-function extractItemsManual(message) {
-  const msg = message.toLowerCase().trim();
-  const words = msg.split(/\s+/);
+// ───────────────── FALLBACK EXTRACTION ─────────────────
+function extractItemsFallback(message) {
+  const msg = message.toLowerCase();
 
-  let quantity = "1 unit";
-  let name = "";
+  const match = msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s?([a-z]+)/);
 
-  for (let i = 0; i < words.length; i++) {
-    if (!isNaN(words[i])) {
-      quantity = words[i] + " unit";
-
-      if (
-        words[i + 1] &&
-        ["kg", "g", "gram", "grams", "litre", "liter", "pcs", "pieces"].includes(words[i + 1])
-      ) {
-        quantity = words[i] + " " + words[i + 1];
-      }
-    } else {
-      if (!name && !["sell", "i", "want", "to", "bechna", "hai"].includes(words[i])) {
-        name = words[i];
-      }
-    }
+  if (match) {
+    return [{
+      name: match[3],
+      quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
+    }];
   }
 
-  return [{ name: name || "unknown", quantity }];
+  return [{
+    name: msg.split(" ")[0],
+    quantity: "1 unit"
+  }];
+}
+
+// ───────────────── GROQ AI EXTRACTION ─────────────────
+async function extractItemsAI(message) {
+  try {
+    const completion = await groq.chat.completions.create({
+      model: "llama3-70b-8192",
+      messages: [
+        {
+          role: "system",
+          content: `
+Extract ALL items with quantity.
+
+Return ONLY JSON:
+[
+ { "name": "item name", "quantity": "number + unit" }
+]
+
+Examples:
+"2 kg potato and 3 kg onion" → 
+[
+ { "name": "potato", "quantity": "2 kg" },
+ { "name": "onion", "quantity": "3 kg" }
+]
+`
+        },
+        {
+          role: "user",
+          content: message
+        }
+      ]
+    });
+
+    let text = completion.choices[0].message.content.trim();
+    text = text.replace(/```json|```/g, "").trim();
+
+    const parsed = JSON.parse(text);
+
+    return parsed.map(i => ({
+      name: (i.name || "unknown").toLowerCase(),
+      quantity: i.quantity || "1 unit"
+    }));
+
+  } catch (err) {
+    console.error("Groq error:", err.message);
+    return extractItemsFallback(message);
+  }
 }
 
 // ───────────────── CHAT ─────────────────
@@ -267,12 +302,12 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const items = extractItemsManual(message);
+    // ✅ USING GROQ AI
+    const items = await extractItemsAI(message);
 
-    // ✅ FIXED: async mandi pricing
     const enriched = await Promise.all(
       items.map(async (i) => ({
-        name: i.name || "unknown",
+        name: i.name,
         quantity: i.quantity,
         suggestedPrice: await getLivePrice(i.name)
       }))
