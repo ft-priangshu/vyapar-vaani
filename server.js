@@ -2,7 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const cors = require("cors");
-const axios = require("axios"); // ✅ ADDED
+const axios = require("axios");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const app = express();
@@ -12,8 +12,9 @@ app.use(bodyParser.json());
 // ───────────────── ENV ─────────────────
 console.log("MONGO_URI =", !!process.env.MONGO_URI);
 console.log("GEMINI_KEY =", !!process.env.GEMINI_API_KEY);
+console.log("MANDI_KEY =", !!process.env.MANDI_API_KEY);
 
-// ───────────────── GEMINI (kept but not used for extraction) ─────────────────
+// ───────────────── GEMINI (unused) ─────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ───────────────── DB ─────────────────
@@ -23,8 +24,6 @@ mongoose
   .catch((err) => console.error("MongoDB error:", err));
 
 // ───────────────── SCHEMAS ─────────────────
-
-// PRODUCTS
 const productSchema = new mongoose.Schema({
   sellerId: String,
   name: String,
@@ -35,7 +34,6 @@ const productSchema = new mongoose.Schema({
 });
 const Product = mongoose.model("Product", productSchema);
 
-// ORDERS
 const orderSchema = new mongoose.Schema({
   productId: String,
   productName: String,
@@ -44,12 +42,11 @@ const orderSchema = new mongoose.Schema({
   buyerName: String,
   phone: String,
   address: String,
-  status: { type: String, default: "PLACED" }, 
+  status: { type: String, default: "PLACED" },
   createdAt: { type: Date, default: Date.now }
 });
 const Order = mongoose.model("Order", orderSchema);
 
-// NOTIFICATIONS
 const notificationSchema = new mongoose.Schema({
   sellerId: String,
   orderId: String,
@@ -61,7 +58,7 @@ const Notification = mongoose.model("Notification", notificationSchema);
 // ───────────────── MEMORY ─────────────────
 const pending = {};
 
-// ───────────────── PRICE ENGINE ─────────────────
+// ───────────────── FALLBACK PRICE ─────────────────
 function getPrice(name = "") {
   const n = name.toLowerCase();
 
@@ -73,6 +70,42 @@ function getPrice(name = "") {
   if (n.includes("milk")) return "₹55/L";
 
   return "₹100 (estimate)";
+}
+
+// ───────────────── MANDI API (FIXED) ─────────────────
+async function getLivePrice(item) {
+  try {
+    const API_KEY = process.env.MANDI_API_KEY;
+
+    const url = `https://api.data.gov.in/resource/35985678-0d79-46b4-9ed6-6f13308a1d24?api-key=${API_KEY}&format=json&limit=100`;
+
+    const res = await axios.get(url);
+    const records = res.data.records || [];
+
+    for (const r of records) {
+      const nameField =
+        r.commodity || r.commodity_name || r.crop || "";
+
+      const priceField =
+        r.modal_price || r.price || r.max_price || r.min_price;
+
+      if (
+        nameField.toLowerCase().includes(item.toLowerCase()) &&
+        priceField
+      ) {
+        const pricePerQuintal = parseFloat(priceField);
+        const pricePerKg = pricePerQuintal / 100;
+
+        return `₹${pricePerKg.toFixed(2)}/kg`;
+      }
+    }
+
+    return getPrice(item);
+
+  } catch (err) {
+    console.error("Mandi API error:", err.message);
+    return getPrice(item);
+  }
 }
 
 // ───────────────── SELL INTENT DETECTOR ─────────────────
@@ -130,11 +163,14 @@ app.post("/chat", async (req, res) => {
 
     const items = extractItemsManual(message);
 
-    const enriched = items.map(i => ({
-      name: i.name || "unknown",
-      quantity: i.quantity,
-      suggestedPrice: getPrice(i.name)
-    }));
+    // ✅ FIXED: async mandi pricing
+    const enriched = await Promise.all(
+      items.map(async (i) => ({
+        name: i.name || "unknown",
+        quantity: i.quantity,
+        suggestedPrice: await getLivePrice(i.name)
+      }))
+    );
 
     const tempId = Date.now().toString();
 
@@ -225,7 +261,7 @@ app.get("/orders", async (req, res) => {
   res.json(await Order.find().sort({ createdAt: -1 }));
 });
 
-// ───────────────── UPDATE STATUS (UPDATED) ─────────────────
+// ───────────────── UPDATE STATUS ─────────────────
 app.patch("/orders/:id/status", async (req, res) => {
   try {
     const { status } = req.body;
@@ -248,17 +284,13 @@ app.patch("/orders/:id/status", async (req, res) => {
       message
     });
 
-    // ✅ SEND TO EXTERNAL CHAT SYSTEM
     try {
-      console.log("Sending to chat system:", message);
-
       await axios.post("https://chatsystemacm.lovable.app/api/messages", {
         sellerId: order.sellerId,
         orderId: order._id,
         message,
         status
       });
-
     } catch (e) {
       console.error("Chat forward failed:", e.message);
     }
