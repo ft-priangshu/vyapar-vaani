@@ -62,12 +62,118 @@ const pending = {};
 function getPrice(name = "") {
   const n = name.toLowerCase();
 
-  if (n.includes("potato")) return "₹20/kg";
-  if (n.includes("onion")) return "₹30/kg";
-  if (n.includes("rice")) return "₹50/kg";
-  if (n.includes("wheat")) return "₹35/kg";
-  if (n.includes("tomato")) return "₹40/kg";
-  if (n.includes("milk")) return "₹55/L";
+  // Vegetables
+if (n.includes("carrot")) return "₹25/kg";
+if (n.includes("cabbage")) return "₹18/kg";
+if (n.includes("cauliflower")) return "₹30/kg";
+if (n.includes("spinach")) return "₹15/kg";
+if (n.includes("brinjal")) return "₹35/kg";
+if (n.includes("capsicum")) return "₹60/kg";
+if (n.includes("peas")) return "₹80/kg";
+if (n.includes("radish")) return "₹20/kg";
+if (n.includes("beetroot")) return "₹35/kg";
+if (n.includes("cucumber")) return "₹25/kg";
+if (n.includes("pumpkin")) return "₹20/kg";
+if (n.includes("bottle gourd")) return "₹22/kg";
+if (n.includes("lauki")) return "₹22/kg";
+if (n.includes("bitter gourd")) return "₹45/kg";
+if (n.includes("karela")) return "₹45/kg";
+if (n.includes("ladyfinger")) return "₹50/kg";
+if (n.includes("okra")) return "₹50/kg";
+if (n.includes("beans")) return "₹70/kg";
+if (n.includes("garlic")) return "₹120/kg";
+if (n.includes("ginger")) return "₹100/kg";
+if (n.includes("green chilli")) return "₹60/kg";
+if (n.includes("chilli")) return "₹60/kg";
+if (n.includes("sweet corn")) return "₹25/piece";
+
+// Fruits
+if (n.includes("apple")) return "₹120/kg";
+if (n.includes("banana")) return "₹40/dozen";
+if (n.includes("mango")) return "₹80/kg";
+if (n.includes("orange")) return "₹60/kg";
+if (n.includes("grapes")) return "₹90/kg";
+if (n.includes("pineapple")) return "₹50/piece";
+if (n.includes("papaya")) return "₹30/kg";
+if (n.includes("watermelon")) return "₹20/kg";
+if (n.includes("muskmelon")) return "₹25/kg";
+if (n.includes("guava")) return "₹50/kg";
+if (n.includes("pomegranate")) return "₹150/kg";
+if (n.includes("litchi")) return "₹120/kg";
+if (n.includes("pear")) return "₹100/kg";
+if (n.includes("plum")) return "₹120/kg";
+
+// Grains
+if (n.includes("maize")) return "₹25/kg";
+if (n.includes("corn")) return "₹25/kg";
+if (n.includes("barley")) return "₹30/kg";
+if (n.includes("millet")) return "₹28/kg";
+if (n.includes("bajra")) return "₹28/kg";
+if (n.includes("jowar")) return "₹30/kg";
+if (n.includes("oats")) return "₹70/kg";
+
+// Pulses
+if (n.includes("lentils")) return "₹90/kg";
+if (n.includes("dal")) return "₹90/kg";
+if (n.includes("chickpeas")) return "₹80/kg";
+if (n.includes("chana")) return "₹80/kg";
+if (n.includes("kidney beans")) return "₹120/kg";
+if (n.includes("rajma")) return "₹120/kg";
+if (n.includes("black gram")) return "₹100/kg";
+if (n.includes("urad")) return "₹100/kg";
+if (n.includes("green gram")) return "₹95/kg";
+if (n.includes("moong")) return "₹95/kg";
+if (n.includes("arhar")) return "₹110/kg";
+if (n.includes("toor")) return "₹110/kg";
+
+// Dairy
+if (n.includes("curd")) return "₹60/kg";
+if (n.includes("paneer")) return "₹300/kg";
+if (n.includes("butter")) return "₹500/kg";
+if (n.includes("ghee")) return "₹600/kg";
+
+// Poultry
+if (n.includes("chicken")) return "₹220/kg";
+
+// Oils
+if (n.includes("mustard oil")) return "₹150/L";
+if (n.includes("sunflower oil")) return "₹140/L";
+if (n.includes("groundnut oil")) return "₹160/L";
+
+// Spices
+if (n.includes("turmeric")) return "₹120/kg";
+if (n.includes("haldi")) return "₹120/kg";
+if (n.includes("coriander")) return "₹100/kg";
+if (n.includes("dhania")) return "₹100/kg";
+if (n.includes("cumin")) return "₹300/kg";
+if (n.includes("jeera")) return "₹300/kg";
+if (n.includes("black pepper")) return "₹600/kg";
+if (n.includes("pepper")) return "₹600/kg";
+if (n.includes("cardamom")) return "₹1200/kg";
+if (n.includes("elaichi")) return "₹1200/kg";
+
+// Sugar & basics
+if (n.includes("jaggery")) return "₹50/kg";
+if (n.includes("gur")) return "₹50/kg";
+if (n.includes("salt")) return "₹20/kg";
+
+// Flowers
+if (n.includes("marigold")) return "₹40/kg";
+if (n.includes("rose")) return "₹5/piece";
+if (n.includes("jasmine")) return "₹200/kg";
+
+// Dry fruits
+if (n.includes("almond")) return "₹700/kg";
+if (n.includes("badam")) return "₹700/kg";
+if (n.includes("cashew")) return "₹800/kg";
+if (n.includes("kaju")) return "₹800/kg";
+if (n.includes("raisin")) return "₹300/kg";
+if (n.includes("kishmish")) return "₹300/kg";
+
+// Others
+if (n.includes("flour")) return "₹40/kg";
+if (n.includes("atta")) return "₹40/kg";
+if (n.includes("bread")) return "₹40/packet";
 
   return "₹100 (estimate)";
 }
