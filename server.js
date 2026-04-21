@@ -4,7 +4,8 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const axios = require("axios");
 const Groq = require("groq-sdk");
-
+const multer = require("multer");
+const upload = multer({ dest: "uploads/" });
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -56,6 +57,42 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Notification = mongoose.model("Notification", notificationSchema);
+// ───────────────── VOICE TO TEXT ─────────────────
+app.post("/voice", upload.single("audio"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No audio file uploaded" });
+    }
+
+    // Send audio to Groq Whisper
+    const transcription = await groq.audio.transcriptions.create({
+      file: require("fs").createReadStream(req.file.path),
+      model: "whisper-large-v3"
+    });
+
+    const text = transcription.text;
+
+    // 🔁 Reuse your existing chat logic
+    const fakeReq = {
+      body: {
+        sellerId: req.body.sellerId,
+        message: text
+      }
+    };
+
+    const fakeRes = {
+      json: (data) => res.json({ ...data, voiceText: text }),
+      status: (code) => res.status(code)
+    };
+
+    // Call your existing /chat logic
+    app._router.handle(fakeReq, fakeRes, require("http").METHODS);
+
+  } catch (err) {
+    console.error("Voice error:", err);
+    res.status(500).json({ error: "Voice processing failed" });
+  }
+});
 
 // ───────────────── MEMORY ─────────────────
 const pending = {};
@@ -184,7 +221,7 @@ if (n.includes("bread")) return "₹40/packet";
   return "₹100 (estimate)";
 }
 
-// ───────────────── MANDI API (FIXED) ─────────────────
+// ───────────────── MANDI API (STRONG MATCH FIX) ─────────────────
 async function getLivePrice(item) {
   try {
     console.log("Searching mandi price for:", item);
@@ -196,12 +233,15 @@ async function getLivePrice(item) {
     const res = await axios.get(url);
     const records = res.data.records || [];
 
+    const itemClean = item.toLowerCase().trim();
+
     for (const r of records) {
-      const nameField =
+      const nameField = (
         r.commodity ||
         r.commodity_name ||
         r.crop ||
-        "";
+        ""
+      ).toLowerCase();
 
       const priceField =
         r.modal_price ||
@@ -209,9 +249,12 @@ async function getLivePrice(item) {
         r.max_price ||
         r.min_price;
 
+      // ✅ STRICT MATCH (FIXED)
       if (
-        item &&
-        nameField.toLowerCase().includes(item.toLowerCase()) &&
+        itemClean &&
+        (nameField === itemClean ||
+         nameField.includes(itemClean) ||
+         itemClean.includes(nameField)) &&
         priceField
       ) {
         console.log("Matched:", nameField, priceField);
@@ -221,6 +264,7 @@ async function getLivePrice(item) {
       }
     }
 
+    console.log("No mandi match, using fallback");
     return getPrice(item);
 
   } catch (err) {
@@ -236,20 +280,17 @@ function isSellIntent(message) {
 }
 
 // ───────────────── FALLBACK EXTRACTION (FIXED) ─────────────────
+// ───────────────── FALLBACK EXTRACTION (FULLY FIXED) ─────────────────
 function extractItemsFallback(message) {
   const msg = message.toLowerCase();
 
-  const match =
-    msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s?([a-z]+)/) ||
-    msg.match(/([a-z]+)\s?(\d+)\s?(kg|g|litre|l|pcs|pieces)/);
+  // Pattern 1: "5 kg onion"
+  let match = msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s+([a-z]+)/);
 
-  if (match) {
-    if (match[3]) {
-      return [{
-        name: match[3],
-        quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
-      }];
-    } else {
+  // Pattern 2: "onion 5 kg"
+  if (!match) {
+    match = msg.match(/([a-z]+)\s+(\d+)\s?(kg|g|litre|l|pcs|pieces)/);
+    if (match) {
       return [{
         name: match[1],
         quantity: `${match[2]} ${match[3]}`
@@ -257,13 +298,21 @@ function extractItemsFallback(message) {
     }
   }
 
+  if (match) {
+    return [{
+      name: match[3],
+      quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
+    }];
+  }
+
+  // fallback safe
   return [{
-    name: msg.split(" ")[0],
+    name: msg.split(" ").find(w => isNaN(w)) || "unknown",
     quantity: "1 unit"
   }];
 }
 
-// ───────────────── GROQ AI EXTRACTION (FIXED) ─────────────────
+// ───────────────── GROQ AI EXTRACTION (STRICT FIX) ─────────────────
 async function extractItemsAI(message) {
   try {
     const completion = await groq.chat.completions.create({
@@ -274,9 +323,14 @@ async function extractItemsAI(message) {
           content: `
 Extract ALL items with quantity.
 
+STRICT RULES:
+- Ignore words like: i, want, to, sell, bechna
+- Only return actual items (onion, potato, rice, etc.)
+- Quantity must be number + unit
+
 Return ONLY JSON:
 [
- { "name": "item name", "quantity": "number + unit" }
+ { "name": "item", "quantity": "2 kg" }
 ]
 `
         },
@@ -298,16 +352,15 @@ Return ONLY JSON:
     }
 
     return parsed.map(i => ({
-      name: (i.name || "unknown").toLowerCase(),
+      name: (i.name || "").toLowerCase().trim(),
       quantity: i.quantity || "1 unit"
-    }));
+    })).filter(i => i.name); // remove empty
 
   } catch (err) {
     console.error("Groq error:", err.message);
     return extractItemsFallback(message);
   }
 }
-
 // ───────────────── CHAT ─────────────────
 app.post("/chat", async (req, res) => {
   try {
