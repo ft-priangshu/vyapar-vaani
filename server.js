@@ -5,7 +5,15 @@ const cors = require("cors");
 const axios = require("axios");
 const Groq = require("groq-sdk");
 const multer = require("multer");
-const upload = multer({ dest: "uploads/" });
+const storage = multer.diskStorage({
+  destination: "uploads/",
+  filename: (req, file, cb) => {
+    const ext = file.originalname.split(".").pop(); // keep extension
+    cb(null, Date.now() + "." + ext);
+  }
+});
+
+const upload = multer({ storage });
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -70,6 +78,7 @@ app.post("/voice", upload.single("audio"), async (req, res) => {
     }
 
     console.log("✅ File received:", req.file.path);
+    console.log("📁 File info:", req.file);
 
     // Check file exists
     if (!fs.existsSync(req.file.path)) {
