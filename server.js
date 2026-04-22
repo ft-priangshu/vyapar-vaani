@@ -367,19 +367,32 @@ function extractItemsFallback(message) {
 }
 function normalizeText(text = "") {
   let clean = text
-    .replace(/[\u0600-\u06FF]/g, "") // Urdu
-    .replace(/[\u0900-\u097F]/g, "") // Hindi
+    // ❌ remove ONLY Urdu/Arabic
+    .replace(/[\u0600-\u06FF]/g, "")
+    
+    // ✅ KEEP Hindi + English
     .toLowerCase()
-    .replace(/[^a-z0-9\s.]/g, " ")
+    
+    // keep Hindi + English letters + numbers
+    .replace(/[^a-z0-9\u0900-\u097F\s.]/g, " ")
+    
     .replace(/\s+/g, " ")
     .trim();
 
-  // 🔥 convert Hinglish to English
+  // 🔥 Hindi → English conversion (VERY IMPORTANT)
   clean = clean
     .replace(/\bpyaz\b/g, "onion")
-    .replace(/\baam\b/g, "mango")
+    .replace(/\bpyaaz\b/g, "onion")
+    .replace(/प्याज/g, "onion")
+
     .replace(/\baloo\b/g, "potato")
-    .replace(/\btamatar\b/g, "tomato");
+    .replace(/आलू/g, "potato")
+
+    .replace(/\baam\b/g, "mango")
+    .replace(/आम/g, "mango")
+
+    .replace(/\btamatar\b/g, "tomato")
+    .replace(/टमाटर/g, "tomato");
 
   return clean;
 }
@@ -392,18 +405,21 @@ async function extractItemsAI(message) {
         {
           role: "system",
        content: `
-You are a STRICT English-only agricultural extractor.
+You are an agricultural item extractor.
+
+INPUT may be:
+- English
+- Hindi
+- Hinglish (like "5 kilo pyaz")
 
 RULES:
-- Input may contain mixed language (Hindi, Urdu, noise)
-- ONLY respond using ENGLISH words
-- If non-English words appear, IGNORE them
-- Extract ONLY real farm items:
-  onion, potato, rice, mango, apple, etc.
+- Convert Hindi to English items
+- Only return English item names
+- Ignore other languages
 
-OUTPUT FORMAT ONLY:
+OUTPUT ONLY JSON:
 [
-  { "name": "item", "quantity": "number + unit" }
+ { "name": "onion", "quantity": "5 kg" }
 ]
 `
         },
