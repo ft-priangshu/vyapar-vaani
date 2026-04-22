@@ -95,7 +95,14 @@ app.post("/voice", upload.single("audio"), async (req, res) => {
 
     console.log("✅ Groq response:", transcription);
 
-    const text = transcription.text || "";
+    let text = transcription.text || "";
+console.log("RAW WHISPER:", text);
+
+// normalize language noise
+text = normalizeText(text);
+
+console.log("CLEAN TEXT:", text);
+
 
     if (!text) {
       console.log("❌ No text extracted");
@@ -358,7 +365,24 @@ function extractItemsFallback(message) {
     quantity: "1 unit"
   }];
 }
+function normalizeText(text = "") {
+  let clean = text
+    .replace(/[\u0600-\u06FF]/g, "") // Urdu
+    .replace(/[\u0900-\u097F]/g, "") // Hindi
+    .toLowerCase()
+    .replace(/[^a-z0-9\s.]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
+  // 🔥 convert Hinglish to English
+  clean = clean
+    .replace(/\bpyaz\b/g, "onion")
+    .replace(/\baam\b/g, "mango")
+    .replace(/\baloo\b/g, "potato")
+    .replace(/\btamatar\b/g, "tomato");
+
+  return clean;
+}
 // ───────────────── GROQ AI EXTRACTION (STRICT FIX) ─────────────────
 async function extractItemsAI(message) {
   try {
@@ -367,17 +391,19 @@ async function extractItemsAI(message) {
       messages: [
         {
           role: "system",
-          content: `
-Extract ALL items with quantity.
+       content: `
+You are a STRICT English-only agricultural extractor.
 
-STRICT RULES:
-- Ignore words like: i, want, to, sell, bechna
-- Only return actual items (onion, potato, rice, etc.)
-- Quantity must be number + unit
+RULES:
+- Input may contain mixed language (Hindi, Urdu, noise)
+- ONLY respond using ENGLISH words
+- If non-English words appear, IGNORE them
+- Extract ONLY real farm items:
+  onion, potato, rice, mango, apple, etc.
 
-Return ONLY JSON:
+OUTPUT FORMAT ONLY:
 [
- { "name": "item", "quantity": "2 kg" }
+  { "name": "item", "quantity": "number + unit" }
 ]
 `
         },
@@ -398,10 +424,21 @@ Return ONLY JSON:
       return extractItemsFallback(message);
     }
 
-    return parsed.map(i => ({
-      name: (i.name || "").toLowerCase().trim(),
-      quantity: i.quantity || "1 unit"
-    })).filter(i => i.name); // remove empty
+    const invalidWords = [
+  "kg","kilogram","kilograms","gram","grams",
+  "litre","l","unit","piece","pieces"
+];
+
+return parsed
+  .map(i => ({
+    name: (i.name || "").toLowerCase().trim(),
+    quantity: i.quantity || "1 unit"
+  }))
+  .filter(i =>
+    i.name &&
+    !invalidWords.includes(i.name) &&
+    i.name.length > 2
+  );// remove empty
 
   } catch (err) {
     console.error("Groq error:", err.message);
