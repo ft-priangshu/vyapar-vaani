@@ -5,15 +5,18 @@ const cors = require("cors");
 const axios = require("axios");
 const Groq = require("groq-sdk");
 const multer = require("multer");
+const fs = require("fs");
+
 const storage = multer.diskStorage({
   destination: "uploads/",
   filename: (req, file, cb) => {
-    const ext = file.originalname.split(".").pop(); // keep extension
+    const ext = file.originalname.split(".").pop();
     cb(null, Date.now() + "." + ext);
   }
 });
 
 const upload = multer({ storage });
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
@@ -65,93 +68,54 @@ const notificationSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Notification = mongoose.model("Notification", notificationSchema);
-const fs = require("fs");
 
-// ───────────────── VOICE TO TEXT (FIXED + DEBUG) ─────────────────
-app.post("/voice", upload.single("audio"), async (req, res) => {
-  try {
-    console.log("🎤 Voice endpoint hit");
-
-    if (!req.file) {
-      console.log("❌ No file received");
-      return res.status(400).json({ error: "No audio file uploaded" });
-    }
-
-    console.log("✅ File received:", req.file.path);
-    console.log("📁 File info:", req.file);
-
-    // Check file exists
-    if (!fs.existsSync(req.file.path)) {
-      console.log("❌ File not saved");
-      return res.status(500).json({ error: "File not saved properly" });
-    }
-
-    // Send to Groq Whisper
-    console.log("🚀 Sending to Groq...");
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(req.file.path),
-      model: "whisper-large-v3"
-    });
-
-    console.log("✅ Groq response:", transcription);
-
-    let text = transcription.text || "";
-console.log("RAW WHISPER:", text);
-
-// normalize language noise
-text = normalizeText(text);
-
-console.log("CLEAN TEXT:", text);
-
-
-    if (!text) {
-      console.log("❌ No text extracted");
-      return res.status(500).json({ error: "No speech detected" });
-    }
-
-    console.log("📝 Transcribed Text:", text);
-
-    // ✅ DIRECTLY CALL YOUR EXISTING LOGIC (NO router hack)
-    const items = await extractItemsAI(text);
-
-    console.log("🧠 Extracted items:", items);
-
-    const enriched = await Promise.all(
-      items.map(async (i) => ({
-        name: i.name,
-        quantity: i.quantity,
-        suggestedPrice: await getLivePrice(i.name)
-      }))
-    );
-
-    const tempId = Date.now().toString();
-
-    pending[tempId] = {
-      sellerId: req.body.sellerId,
-      items: enriched
-    };
-
-    return res.json({
-      type: "SELL",
-      message: "Voice processed successfully",
-      voiceText: text,
-      tempId,
-      items: enriched,
-      nextStep: "CONFIRM"
-    });
-
-  } catch (err) {
-    console.error("❌ Voice error FULL:", err);
-    res.status(500).json({
-      error: "Voice processing failed",
-      details: err.message
-    });
-  }
-});
 // ───────────────── MEMORY ─────────────────
 const pending = {};
 
-// ───────────────── FALLBACK PRICE ─────────────────
+// ───────────────── NORMALIZE TEXT (FIXED) ─────────────────
+function normalizeText(text = "") {
+  let clean = text
+    .replace(/[\u0600-\u06FF]/g, "") // remove Urdu
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0900-\u097F\s.]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  clean = clean
+    .replace(/\bpyaz\b/g, "onion")
+    .replace(/प्याज/g, "onion")
+    .replace(/\baloo\b/g, "potato")
+    .replace(/आलू/g, "potato")
+    .replace(/\baam\b/g, "mango")
+    .replace(/आम/g, "mango")
+    .replace(/\btamatar\b/g, "tomato")
+    .replace(/टमाटर/g, "tomato")
+    .replace(/\bkilograms?\b/g, "kg")
+    .replace(/\bkilo\b/g, "kg")
+    .replace(/किलो/g, "kg");
+
+  return clean;
+}
+
+// ───────────────── FIX WRONG ITEM NAMES ─────────────────
+function fixItemName(name, originalText) {
+  const units = [
+    "kg","kilogram","kilograms","gram","grams",
+    "litre","l","unit","piece","pieces"
+  ];
+
+  if (units.includes(name)) {
+    const words = originalText.split(" ");
+    const realItem = words.find(w =>
+      isNaN(w) && !units.includes(w) && w.length > 2
+    );
+    return realItem || "unknown";
+  }
+
+  return name;
+}
+
+// ───────────────── PRICE ENGINE ─────────────────
 function getPrice(name = "") {
   const n = name.toLowerCase();
 
@@ -159,127 +123,13 @@ function getPrice(name = "") {
   if (n.includes("potato")) return "₹20/kg";
   if (n.includes("rice")) return "₹50/kg";
   if (n.includes("wheat")) return "₹35/kg";
-  // Vegetables
-if (n.includes("carrot")) return "₹25/kg";
-if (n.includes("cabbage")) return "₹18/kg";
-if (n.includes("cauliflower")) return "₹30/kg";
-if (n.includes("spinach")) return "₹15/kg";
-if (n.includes("brinjal")) return "₹35/kg";
-if (n.includes("capsicum")) return "₹60/kg";
-if (n.includes("peas")) return "₹80/kg";
-if (n.includes("radish")) return "₹20/kg";
-if (n.includes("beetroot")) return "₹35/kg";
-if (n.includes("cucumber")) return "₹25/kg";
-if (n.includes("pumpkin")) return "₹20/kg";
-if (n.includes("bottle gourd")) return "₹22/kg";
-if (n.includes("lauki")) return "₹22/kg";
-if (n.includes("bitter gourd")) return "₹45/kg";
-if (n.includes("karela")) return "₹45/kg";
-if (n.includes("ladyfinger")) return "₹50/kg";
-if (n.includes("okra")) return "₹50/kg";
-if (n.includes("beans")) return "₹70/kg";
-if (n.includes("garlic")) return "₹120/kg";
-if (n.includes("ginger")) return "₹100/kg";
-if (n.includes("green chilli")) return "₹60/kg";
-if (n.includes("chilli")) return "₹60/kg";
-if (n.includes("sweet corn")) return "₹25/piece";
-
-// Fruits
-if (n.includes("apple")) return "₹120/kg";
-if (n.includes("banana")) return "₹40/dozen";
-if (n.includes("mango")) return "₹80/kg";
-if (n.includes("orange")) return "₹60/kg";
-if (n.includes("grapes")) return "₹90/kg";
-if (n.includes("pineapple")) return "₹50/piece";
-if (n.includes("papaya")) return "₹30/kg";
-if (n.includes("watermelon")) return "₹20/kg";
-if (n.includes("muskmelon")) return "₹25/kg";
-if (n.includes("guava")) return "₹50/kg";
-if (n.includes("pomegranate")) return "₹150/kg";
-if (n.includes("litchi")) return "₹120/kg";
-if (n.includes("pear")) return "₹100/kg";
-if (n.includes("plum")) return "₹120/kg";
-
-// Grains
-if (n.includes("maize")) return "₹25/kg";
-if (n.includes("corn")) return "₹25/kg";
-if (n.includes("barley")) return "₹30/kg";
-if (n.includes("millet")) return "₹28/kg";
-if (n.includes("bajra")) return "₹28/kg";
-if (n.includes("jowar")) return "₹30/kg";
-if (n.includes("oats")) return "₹70/kg";
-
-// Pulses
-if (n.includes("lentils")) return "₹90/kg";
-if (n.includes("dal")) return "₹90/kg";
-if (n.includes("chickpeas")) return "₹80/kg";
-if (n.includes("chana")) return "₹80/kg";
-if (n.includes("kidney beans")) return "₹120/kg";
-if (n.includes("rajma")) return "₹120/kg";
-if (n.includes("black gram")) return "₹100/kg";
-if (n.includes("urad")) return "₹100/kg";
-if (n.includes("green gram")) return "₹95/kg";
-if (n.includes("moong")) return "₹95/kg";
-if (n.includes("arhar")) return "₹110/kg";
-if (n.includes("toor")) return "₹110/kg";
-
-// Dairy
-if (n.includes("curd")) return "₹60/kg";
-if (n.includes("paneer")) return "₹300/kg";
-if (n.includes("butter")) return "₹500/kg";
-if (n.includes("ghee")) return "₹600/kg";
-
-// Poultry
-if (n.includes("chicken")) return "₹220/kg";
-
-// Oils
-if (n.includes("mustard oil")) return "₹150/L";
-if (n.includes("sunflower oil")) return "₹140/L";
-if (n.includes("groundnut oil")) return "₹160/L";
-
-// Spices
-if (n.includes("turmeric")) return "₹120/kg";
-if (n.includes("haldi")) return "₹120/kg";
-if (n.includes("coriander")) return "₹100/kg";
-if (n.includes("dhania")) return "₹100/kg";
-if (n.includes("cumin")) return "₹300/kg";
-if (n.includes("jeera")) return "₹300/kg";
-if (n.includes("black pepper")) return "₹600/kg";
-if (n.includes("pepper")) return "₹600/kg";
-if (n.includes("cardamom")) return "₹1200/kg";
-if (n.includes("elaichi")) return "₹1200/kg";
-
-// Sugar & basics
-if (n.includes("jaggery")) return "₹50/kg";
-if (n.includes("gur")) return "₹50/kg";
-if (n.includes("salt")) return "₹20/kg";
-
-// Flowers
-if (n.includes("marigold")) return "₹40/kg";
-if (n.includes("rose")) return "₹5/piece";
-if (n.includes("jasmine")) return "₹200/kg";
-
-// Dry fruits
-if (n.includes("almond")) return "₹700/kg";
-if (n.includes("badam")) return "₹700/kg";
-if (n.includes("cashew")) return "₹800/kg";
-if (n.includes("kaju")) return "₹800/kg";
-if (n.includes("raisin")) return "₹300/kg";
-if (n.includes("kishmish")) return "₹300/kg";
-
-// Others
-if (n.includes("flour")) return "₹40/kg";
-if (n.includes("atta")) return "₹40/kg";
-if (n.includes("bread")) return "₹40/packet";
 
   return "₹100 (estimate)";
 }
 
-// ───────────────── MANDI API (STRONG MATCH FIX) ─────────────────
+// ───────────────── MANDI API ─────────────────
 async function getLivePrice(item) {
   try {
-    console.log("Searching mandi price for:", item);
-
     const API_KEY = process.env.MANDI_API;
 
     const url = `https://api.data.gov.in/resource/35985678-0d79-46b4-9ed6-6f13308a1d24?api-key=${API_KEY}&format=json&limit=100`;
@@ -290,60 +140,34 @@ async function getLivePrice(item) {
     const itemClean = item.toLowerCase().trim();
 
     for (const r of records) {
-      const nameField = (
-        r.commodity ||
-        r.commodity_name ||
-        r.crop ||
-        ""
-      ).toLowerCase();
+      const nameField = (r.commodity || "").toLowerCase();
+      const priceField = r.modal_price;
 
-      const priceField =
-        r.modal_price ||
-        r.price ||
-        r.max_price ||
-        r.min_price;
-
-      // ✅ STRICT MATCH (FIXED)
       if (
         itemClean &&
-        (nameField === itemClean ||
-         nameField.includes(itemClean) ||
-         itemClean.includes(nameField)) &&
+        (nameField.includes(itemClean) || itemClean.includes(nameField)) &&
         priceField
       ) {
-        console.log("Matched:", nameField, priceField);
-
         const pricePerKg = parseFloat(priceField) / 100;
         return `₹${pricePerKg.toFixed(2)}/kg`;
       }
     }
 
-    console.log("No mandi match, using fallback");
     return getPrice(item);
 
-  } catch (err) {
-    console.error("Mandi API error:", err.message);
+  } catch {
     return getPrice(item);
   }
 }
 
-// ───────────────── SELL INTENT ─────────────────
-function isSellIntent(message) {
-  const msg = message.toLowerCase();
-  return msg.includes("sell") || msg.includes("bechna") || /\d+/.test(msg);
-}
-
-// ───────────────── FALLBACK EXTRACTION (FIXED) ─────────────────
-// ───────────────── FALLBACK EXTRACTION (FULLY FIXED) ─────────────────
+// ───────────────── FALLBACK EXTRACTION ─────────────────
 function extractItemsFallback(message) {
   const msg = message.toLowerCase();
 
-  // Pattern 1: "5 kg onion"
-  let match = msg.match(/(\d+)\s?(kg|g|litre|l|pcs|pieces)?\s+([a-z]+)/);
+  let match = msg.match(/(\d+)\s?(kg|g)?\s+([a-z]+)/);
 
-  // Pattern 2: "onion 5 kg"
   if (!match) {
-    match = msg.match(/([a-z]+)\s+(\d+)\s?(kg|g|litre|l|pcs|pieces)/);
+    match = msg.match(/([a-z]+)\s+(\d+)\s?(kg|g)/);
     if (match) {
       return [{
         name: match[1],
@@ -355,48 +179,14 @@ function extractItemsFallback(message) {
   if (match) {
     return [{
       name: match[3],
-      quantity: match[2] ? `${match[1]} ${match[2]}` : `${match[1]} unit`
+      quantity: `${match[1]} ${match[2] || "unit"}`
     }];
   }
 
-  // fallback safe
-  return [{
-    name: msg.split(" ").find(w => isNaN(w)) || "unknown",
-    quantity: "1 unit"
-  }];
+  return [{ name: "unknown", quantity: "1 unit" }];
 }
-function normalizeText(text = "") {
-  let clean = text
-    // ❌ remove ONLY Urdu/Arabic
-    .replace(/[\u0600-\u06FF]/g, "")
-    
-    // ✅ KEEP Hindi + English
-    .toLowerCase()
-    
-    // keep Hindi + English letters + numbers
-    .replace(/[^a-z0-9\u0900-\u097F\s.]/g, " ")
-    
-    .replace(/\s+/g, " ")
-    .trim();
 
-  // 🔥 Hindi → English conversion (VERY IMPORTANT)
-  clean = clean
-    .replace(/\bpyaz\b/g, "onion")
-    .replace(/\bpyaaz\b/g, "onion")
-    .replace(/प्याज/g, "onion")
-
-    .replace(/\baloo\b/g, "potato")
-    .replace(/आलू/g, "potato")
-
-    .replace(/\baam\b/g, "mango")
-    .replace(/आम/g, "mango")
-
-    .replace(/\btamatar\b/g, "tomato")
-    .replace(/टमाटर/g, "tomato");
-
-  return clean;
-}
-// ───────────────── GROQ AI EXTRACTION (STRICT FIX) ─────────────────
+// ───────────────── GROQ AI EXTRACTION ─────────────────
 async function extractItemsAI(message) {
   try {
     const completion = await groq.chat.completions.create({
@@ -404,20 +194,12 @@ async function extractItemsAI(message) {
       messages: [
         {
           role: "system",
-       content: `
-You are an agricultural item extractor.
+          content: `
+Extract items with quantity.
 
-INPUT may be:
-- English
-- Hindi
-- Hinglish (like "5 kilo pyaz")
+Support English + Hindi.
 
-RULES:
-- Convert Hindi to English items
-- Only return English item names
-- Ignore other languages
-
-OUTPUT ONLY JSON:
+Return JSON only:
 [
  { "name": "onion", "quantity": "5 kg" }
 ]
@@ -440,50 +222,39 @@ OUTPUT ONLY JSON:
       return extractItemsFallback(message);
     }
 
-    const invalidWords = [
-  "kg","kilogram","kilograms","gram","grams",
-  "litre","l","unit","piece","pieces"
-];
+    return parsed.map(i => ({
+      name: fixItemName((i.name || "").toLowerCase(), message),
+      quantity: i.quantity || "1 unit"
+    }));
 
-return parsed
-  .map(i => ({
-    name: (i.name || "").toLowerCase().trim(),
-    quantity: i.quantity || "1 unit"
-  }))
-  .filter(i =>
-    i.name &&
-    !invalidWords.includes(i.name) &&
-    i.name.length > 2
-  );// remove empty
-
-  } catch (err) {
-    console.error("Groq error:", err.message);
+  } catch {
     return extractItemsFallback(message);
   }
 }
-// ───────────────── CHAT ─────────────────
-app.post("/chat", async (req, res) => {
+
+// ───────────────── VOICE ROUTE (FIXED) ─────────────────
+app.post("/voice", upload.single("audio"), async (req, res) => {
   try {
-    const { sellerId, message } = req.body;
+    if (!req.file) return res.status(400).json({ error: "No file" });
 
-    if (!sellerId || !message) {
-      return res.status(400).json({ error: "sellerId + message required" });
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(req.file.path),
+      model: "whisper-large-v3"
+    });
+
+    let text = transcription.text || "";
+
+    if (!text.trim()) {
+      return res.status(500).json({ error: "No speech detected" });
     }
 
-    const isSell = isSellIntent(message);
+    const cleaned = normalizeText(text);
+    text = cleaned || text.toLowerCase();
 
-    if (!isSell) {
-      return res.json({
-        type: "CHAT",
-        reply: "Got it 👍 How can I help you?",
-        items: []
-      });
-    }
-
-    const items = await extractItemsAI(message);
+    const items = await extractItemsAI(text);
 
     const enriched = await Promise.all(
-      items.map(async (i) => ({
+      items.map(async i => ({
         name: i.name,
         quantity: i.quantity,
         suggestedPrice: await getLivePrice(i.name)
@@ -491,143 +262,68 @@ app.post("/chat", async (req, res) => {
     );
 
     const tempId = Date.now().toString();
+    pending[tempId] = { sellerId: req.body.sellerId, items: enriched };
 
-    pending[tempId] = { sellerId, items: enriched };
-
-    return res.json({
+    res.json({
       type: "SELL",
-      message: "Do you want to sell at suggested price?",
+      message: "Voice processed successfully",
+      voiceText: text,
       tempId,
       items: enriched,
       nextStep: "CONFIRM"
     });
 
   } catch (err) {
-    console.error("CHAT ERROR:", err);
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ error: "Voice processing failed" });
   }
 });
 
-// ───────────────── CONFIRM SELL ─────────────────
-app.post("/confirm-sell", async (req, res) => {
-  try {
-    const { tempId, confirm } = req.body;
+// ───────────────── CHAT ─────────────────
+app.post("/chat", async (req, res) => {
+  const { sellerId, message } = req.body;
 
-    if (!pending[tempId]) {
-      return res.status(400).json({ error: "Session expired" });
-    }
+  const items = await extractItemsAI(normalizeText(message));
 
-    const data = pending[tempId];
-    delete pending[tempId];
-
-    if (!confirm) {
-      return res.json({ message: "Cancelled" });
-    }
-
-    const saved = await Product.insertMany(
-      data.items.map(i => ({
-        sellerId: data.sellerId,
-        name: i.name,
-        quantity: i.quantity,
-        suggestedPrice: i.suggestedPrice,
-        status: "LIVE"
-      }))
-    );
-
-    res.json({
-      message: "OK getting listed on marketplace",
-      products: saved
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: "confirm failed" });
-  }
-});
-
-// ───────────────── MARKETPLACE ─────────────────
-app.get("/products", async (req, res) => {
-  res.json(await Product.find({ status: "LIVE" }));
-});
-
-// ───────────────── BUY ─────────────────
-app.post("/buy", async (req, res) => {
-  try {
-    const { productId, buyerName, phone, address } = req.body;
-
-    const product = await Product.findById(productId);
-    if (!product) return res.status(404).json({ error: "Not found" });
-
-    const order = await Order.create({
-      productId,
-      productName: product.name,
-      quantity: product.quantity,
-      sellerId: product.sellerId,
-      buyerName,
-      phone,
-      address
-    });
-
-    res.json({ message: "Order placed successfully", order });
-
-  } catch (err) {
-    res.status(500).json({ error: "buy failed" });
-  }
-});
-
-// ───────────────── GET ORDERS ─────────────────
-app.get("/orders", async (req, res) => {
-  res.json(await Order.find().sort({ createdAt: -1 }));
-});
-
-// ───────────────── UPDATE STATUS ─────────────────
-app.patch("/orders/:id/status", async (req, res) => {
-  try {
-    const { status } = req.body;
-
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
-    );
-
-    let message = "";
-
-    if (status === "PICKUP_PLANNED") message = "Pickup Planned";
-    if (status === "PICKED") message = "Picked";
-    if (status === "DELIVERED") message = "Delivered";
-
-    await Notification.create({
-      sellerId: order.sellerId,
-      orderId: order._id,
-      message
-    });
-
-    try {
-      await axios.post("https://chatsystemacm.lovable.app/api/messages", {
-        sellerId: order.sellerId,
-        orderId: order._id,
-        message,
-        status
-      });
-    } catch (e) {
-      console.error("Chat forward failed:", e.message);
-    }
-
-    res.json(order);
-
-  } catch (err) {
-    res.status(500).json({ error: "status update failed" });
-  }
-});
-
-// ───────────────── NOTIFICATIONS ─────────────────
-app.get("/notifications/:sellerId", async (req, res) => {
-  res.json(
-    await Notification.find({ sellerId: req.params.sellerId }).sort({ createdAt: -1 })
+  const enriched = await Promise.all(
+    items.map(async i => ({
+      name: i.name,
+      quantity: i.quantity,
+      suggestedPrice: await getLivePrice(i.name)
+    }))
   );
+
+  const tempId = Date.now().toString();
+  pending[tempId] = { sellerId, items: enriched };
+
+  res.json({
+    type: "SELL",
+    message: "Do you want to sell at suggested price?",
+    tempId,
+    items: enriched,
+    nextStep: "CONFIRM"
+  });
+});
+
+// ───────────────── CONFIRM ─────────────────
+app.post("/confirm-sell", async (req, res) => {
+  const { tempId, confirm } = req.body;
+
+  const data = pending[tempId];
+  delete pending[tempId];
+
+  if (!confirm) return res.json({ message: "Cancelled" });
+
+  const saved = await Product.insertMany(
+    data.items.map(i => ({
+      sellerId: data.sellerId,
+      name: i.name,
+      quantity: i.quantity,
+      suggestedPrice: i.suggestedPrice
+    }))
+  );
+
+  res.json({ message: "Listed", products: saved });
 });
 
 // ───────────────── SERVER ─────────────────
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
-});
+app.listen(3000, () => console.log("Server running"));
